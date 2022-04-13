@@ -3,9 +3,10 @@ use std::ptr::{NonNull, null};
 use std::ffi::{c_void, CStr};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use libc::{c_char, c_int};
-use super::{hts_err, get_cstr, hts_idx_t, hts_itr_t, HtsItr, HtsPos, BGZF};
+use super::{hts_err, hts_idx_t, hts_itr_t, HtsItr, HtsPos, BGZF};
 
 pub const TBX_GENERIC: i32 = 0;
 pub const TBX_SAM: i32 = 1;
@@ -103,10 +104,11 @@ impl Drop for Tbx {
 
 
 impl Tbx {
-   pub fn new<S: AsRef<str>>(name: S) -> io::Result<Self> {
+   pub fn new<S: AsRef<Path>>(name: S) -> io::Result<Self> {
       let name = name.as_ref();
-      match NonNull::new(unsafe{ tbx_index_load3(get_cstr(name).as_ptr(), null::<c_char>(), 0)}) {
-         None =>	Err(hts_err(format!("Couldn't open tabix index for file {}", name))),
+
+      match NonNull::new(unsafe{ tbx_index_load3(name.as_os_str().as_bytes().as_ptr() as *const c_char, null::<c_char>(), 0)}) {
+         None =>	Err(hts_err(format!("Couldn't open tabix index for file {}", name.display()))),
          Some(p) => Ok(Tbx{inner: p, phantom: PhantomData}),
       }
    }
