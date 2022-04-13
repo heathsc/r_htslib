@@ -432,6 +432,8 @@ impl Drop for HtsItr {
 }
 
 impl HtsItr {
+    pub fn new(itr: *mut hts_itr_t) -> Option<Self> { NonNull::new(itr).map(|p| HtsItr{ inner: p, phantom: PhantomData}) }
+
     pub fn sam_itr_next(&mut self, fp: &mut HtsFile, mut brec: BamRec) -> SamReadResult {
         let p = brec.inner_mut();
         match unsafe {

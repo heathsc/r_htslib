@@ -11,6 +11,8 @@ pub use vcf::*;
 pub mod faidx;
 pub use faidx::*;
 pub mod kstring;
+pub mod tbx;
+
 pub use kstring::*;
 
 fn get_cstr<S: AsRef<str>>(s: S) -> CString {
