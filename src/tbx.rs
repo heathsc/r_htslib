@@ -1,6 +1,6 @@
 use std::io;
 use std::ptr::{NonNull, null};
-use std::ffi::{c_void, CStr};
+use std::ffi::{c_void, CStr, CString};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::ffi::OsStrExt;
@@ -106,8 +106,8 @@ impl Drop for Tbx {
 impl Tbx {
    pub fn new<S: AsRef<Path>>(name: S) -> io::Result<Self> {
       let name = name.as_ref();
-
-      match NonNull::new(unsafe{ tbx_index_load3(name.as_os_str().as_bytes().as_ptr() as *const c_char, null::<c_char>(), 0)}) {
+      let cname = CString::new(name.as_os_str().as_bytes()).unwrap();
+      match NonNull::new(unsafe{ tbx_index_load3(cname.as_ptr(), null::<c_char>(), 0)}) {
          None =>	Err(hts_err(format!("Couldn't open tabix index for file {}", name.display()))),
          Some(p) => Ok(Tbx{inner: p, phantom: PhantomData}),
       }
