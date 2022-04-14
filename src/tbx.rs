@@ -67,6 +67,7 @@ impl tbx_t {
    }
 }
 
+#[derive(Debug)]
 pub struct Tbx {
    inner: NonNull<tbx_t>,
    phantom: PhantomData<tbx_t>,
@@ -101,7 +102,6 @@ impl Drop for Tbx {
       unsafe { tbx_destroy(self.as_mut()) };
    }
 }
-
 
 impl Tbx {
    pub fn new<S: AsRef<Path>>(name: S) -> io::Result<Self> {
