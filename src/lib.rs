@@ -12,6 +12,7 @@ pub mod faidx;
 pub use faidx::*;
 pub mod kstring;
 pub mod tbx;
+pub mod regidx;
 
 pub use kstring::*;
 
