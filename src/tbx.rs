@@ -6,6 +6,7 @@ use std::ops::{Deref, DerefMut};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use libc::{c_char, c_int};
+use crate::HtsItrType;
 use super::{hts_err, hts_idx_t, hts_itr_t, HtsItr, HtsPos, BGZF};
 
 pub const TBX_GENERIC: i32 = 0;
@@ -41,6 +42,7 @@ extern "C" {
    fn tbx_seqnames(tbx: *const tbx_t, n: *mut c_int) -> *mut *const c_char;
    fn tbx_readrec(fp: *mut BGZF, tbxv: *mut c_void, sv: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int;
    fn tbx_destroy(tbx: *mut tbx_t);
+   fn tbx_name2id(tbx: *const tbx_t, ss: *const c_char) -> c_int;
    pub fn tbx_index_build(fname: *const c_char, min_shift: c_int, conf: *const tbx_conf_t) -> c_int;
 }
 
@@ -60,10 +62,17 @@ impl tbx_t {
          unsafe {libc::free(p as *mut c_void)};
          Some(v)
       }
-
    }
    pub fn tbx_itr_queryi(&self, tid: c_int, beg: HtsPos, end: HtsPos) -> io::Result<HtsItr> {
-      HtsItr::new(unsafe {hts_itr_query(self.index, tid, beg, end, tbx_readrec)}).ok_or_else(|| hts_err("Failed to obtain tbx iterator".to_string()))
+      HtsItr::new(unsafe {hts_itr_query(self.index, tid, beg, end, tbx_readrec)}, HtsItrType::TbxItr).ok_or_else(|| hts_err("Failed to obtain tbx iterator".to_string()))
+   }
+   pub fn name2id(&self, s: &CStr) -> io::Result<usize> {
+      let x = unsafe { tbx_name2id(self, s.as_ptr())};
+      if x >= 0 {
+         Ok(x as usize)
+      } else {
+         Err(hts_err(format!("Failed to convert {:?} to id", s)))
+      }
    }
 }
 
@@ -94,7 +103,6 @@ impl AsMut<tbx_t> for Tbx {
    fn as_mut(&mut self) -> &mut tbx_t { self}
 }
 
-unsafe impl Sync for Tbx {}
 unsafe impl Send for Tbx {}
 
 impl Drop for Tbx {

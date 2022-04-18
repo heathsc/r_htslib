@@ -34,7 +34,6 @@ pub struct VcfHeader {
     inner: NonNull<bcf_hdr_t>,
 }
 
-unsafe impl Sync for VcfHeader {}
 unsafe impl Send for VcfHeader {}
 
 impl VcfHeader {
@@ -162,7 +161,6 @@ pub struct BcfRec {
     inner: NonNull<bcf1_t>,
 }
 
-unsafe impl Sync for BcfRec {}
 unsafe impl Send for BcfRec {}
 
 impl BcfRec {

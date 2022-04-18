@@ -47,6 +47,24 @@ pub struct htsFile {
 pub struct hts_idx_t {
     _unused: [u8; 0],
 }
+
+#[repr(C)]
+pub struct hts_reglist_t {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+pub struct hts_pair64_max {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+pub struct HtsItrBins {
+    n: c_int,
+    m: c_int,
+    a: *mut c_int,
+}
+
 #[repr(C)]
 #[derive(BitfieldStruct)]
 pub struct hts_itr_t {
@@ -57,8 +75,31 @@ pub struct hts_itr_t {
     #[bitfield(name = "multi", ty = "c_uchar", bits = "4..=4")]
     #[bitfield(name = "dummy", ty = "u32", bits = "5..=31")]
     bfield: [u8; 4],
-    _unused: [u8; 0],
+    tid: c_int,
+    n_off: c_int,
+    i: c_int,
+    n_reg: c_int,
+    beg: HtsPos,
+    end: HtsPos,
+    reg_list: *mut hts_reglist_t,
+    curr_tid: c_int,
+    curr_reg: c_int,
+    curr_intv: c_int,
+    curr_beg: HtsPos,
+    curr_end: HtsPos,
+    curr_off: u64,
+    nocoor_off: u64,
+    off: *mut hts_pair64_max,
+    readrec: HtsReadrecFunc,
+    seek: HtsSeekFunc,
+    tell: HtsTellFunc,
+    bins: HtsItrBins,
 }
+
+pub type HtsReadrecFunc = unsafe extern fn(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos);
+pub type HtsSeekFunc = unsafe extern fn(fp: *mut c_void, offset: i64, where_: c_int);
+pub type HtsTellFunc = unsafe extern fn(fp: *mut c_void);
+
 #[repr(C)]
 pub struct BGZF {
     _unused: [u8; 0],
@@ -206,7 +247,6 @@ pub struct HtsFile {
     phantom: PhantomData<htsFile>,
 }
 
-unsafe impl Sync for HtsFile {}
 unsafe impl Send for HtsFile {}
 
 impl Drop for HtsFile {
@@ -306,7 +346,6 @@ pub struct HtsIndex {
     phantom: PhantomData<hts_idx_t>,
 }
 
-unsafe impl Sync for HtsIndex {}
 unsafe impl Send for HtsIndex {}
 
 impl HtsIndex {
@@ -325,6 +364,7 @@ impl HtsIndex {
         if let Some(itr) = it {
             Ok(HtsItr {
                 inner: itr,
+                itr_type: HtsItrType::SamItr,
                 phantom: PhantomData,
             })
         } else {
@@ -351,6 +391,7 @@ impl HtsIndex {
         if let Some(itr) = it {
             Ok(HtsItr {
                 inner: itr,
+                itr_type: HtsItrType::SamItr,
                 phantom: PhantomData,
             })
         } else {
@@ -417,12 +458,18 @@ impl HtsFormat {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum HtsItrType {
+    SamItr,
+    TbxItr,
+}
+
 pub struct HtsItr {
     inner: NonNull<hts_itr_t>,
+    itr_type: HtsItrType,
     phantom: PhantomData<hts_itr_t>,
 }
 
-unsafe impl Sync for HtsItr {}
 unsafe impl Send for HtsItr {}
 
 impl Drop for HtsItr {
@@ -432,9 +479,12 @@ impl Drop for HtsItr {
 }
 
 impl HtsItr {
-    pub fn new(itr: *mut hts_itr_t) -> Option<Self> { NonNull::new(itr).map(|p| HtsItr{ inner: p, phantom: PhantomData}) }
+    pub fn new(itr: *mut hts_itr_t, itr_type: HtsItrType) -> Option<Self> { NonNull::new(itr).map(|p| HtsItr{ inner: p, itr_type, phantom: PhantomData}) }
 
     pub fn sam_itr_next(&mut self, fp: &mut HtsFile, mut brec: BamRec) -> SamReadResult {
+        if self.itr_type != HtsItrType::SamItr {
+            return SamReadResult::Error
+        }
         let p = brec.inner_mut();
         match unsafe {
             if (*self.inner.as_ref()).multi() != 0 {

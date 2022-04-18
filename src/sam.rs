@@ -122,7 +122,6 @@ pub struct SamHeader {
     phantom: PhantomData<sam_hdr_t>,
 }
 
-unsafe impl Sync for SamHeader {}
 unsafe impl Send for SamHeader {}
 
 impl Drop for SamHeader {

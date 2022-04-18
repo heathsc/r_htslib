@@ -28,7 +28,6 @@ pub struct Faidx {
     inner: NonNull<faidx_t>,
 }
 
-unsafe impl Sync for Faidx {}
 unsafe impl Send for Faidx {}
 
 impl Faidx {
