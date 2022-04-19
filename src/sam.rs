@@ -328,7 +328,7 @@ impl bam1_t {
    }
 
    pub fn qnames_eq(&self, b: &BamRec) -> io::Result<bool> {
-      if !(self.data.is_null() || b.data.is_null()) {
+      if self.data.is_null() || b.data.is_null() {
          Err(hts_err("Attempt to compare empty Bam Records".to_string()))
       } else {
          Ok(unsafe { libc::strcmp(self.data, b.data) } == 0 )
