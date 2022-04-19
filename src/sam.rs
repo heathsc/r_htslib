@@ -263,11 +263,11 @@ impl bam1_t {
       }
    }
 
-   pub fn qname(&self) -> Option<&str> {
+   pub fn qname(&self) -> io::Result<&str> {
       if self.data.is_null() {
-         None
+         Err(hts_err("Empty BamRec".to_string()))
       } else {
-         Some(from_cstr(self.data))
+         Ok(from_cstr(self.data))
       }
    }
 
@@ -327,11 +327,11 @@ impl bam1_t {
       self.core.l_qseq
    }
 
-   pub fn qnames_eq(&self, b: &BamRec) -> Option<bool> {
+   pub fn qnames_eq(&self, b: &BamRec) -> io::Result<bool> {
       if !(self.data.is_null() || b.data.is_null()) {
-         None
+         Err(hts_err("Attempt to compare empty Bam Records".to_string()))
       } else {
-         Some(unsafe { libc::strcmp(self.data, b.data) } == 0 )
+         Ok(unsafe { libc::strcmp(self.data, b.data) } == 0 )
       }
    }
 
