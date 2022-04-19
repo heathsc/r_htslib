@@ -1,10 +1,12 @@
-use super::{bam1_t, get_cstr, hts_err, kstring_t, sam_hdr_t, BamRec, SamHeader, SamReadResult};
+use super::{bam1_t, bcf1_t, tbx_t, get_cstr, hts_err, kstring_t, sam_hdr_t, SamHeader};
+
 use c2rust_bitfields::BitfieldStruct;
 use libc::{c_char, c_int, c_short, c_uchar, c_uint};
 use std::ffi::{c_void, CString};
 use std::io;
 use std::marker::PhantomData;
 use std::ptr::{null_mut, NonNull};
+use std::ops::{Deref, DerefMut};
 
 pub type HtsPos = i64;
 
@@ -27,6 +29,11 @@ pub struct hts_opt {
 }
 
 #[repr(C)]
+pub struct hts_filter_t {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
 #[derive(BitfieldStruct)]
 pub struct htsFile {
     #[bitfield(name = "is_bin", ty = "c_uchar", bits = "0..=0")]
@@ -41,8 +48,39 @@ pub struct htsFile {
     fn_: *mut c_char,
     fn_aux: *mut c_char,
     fp: *mut c_void,
-    _unused: [u8; 0],
+    state: *mut c_void,
+    format: htsFormat,
+    idx: *mut hts_idx_t,
+    fnidx: *const c_char,
+    bam_header: *mut sam_hdr_t,
+    filter: *mut hts_filter_t,
 }
+
+impl htsFile {
+    pub fn format(&self) -> HtsFormat {
+        HtsFormat {
+            inner: NonNull::new(unsafe { hts_get_format(self) }).expect("hts_get_format returned NULL"),
+            phantom: PhantomData,
+            owned: false,
+        }
+    }
+    /*
+    pub fn sam_index_load(&mut self) -> io::Result<HtsIndex> {
+        match NonNull::new(unsafe {
+            sam_index_load(self.inner_mut(), get_cstr(&self.name).as_ptr())
+        }) {
+            None => Err(hts_err(format!(
+                "Couldn't load SAM index for file {}",
+                self.name
+            ))),
+            Some(idx) => Ok(HtsIndex {
+                inner: idx,
+                phantom: PhantomData,
+            }),
+        }
+    } */
+}
+
 #[repr(C)]
 pub struct hts_idx_t {
     _unused: [u8; 0],
@@ -210,32 +248,17 @@ impl Drop for htsFormat {
 #[link(name = "hts")]
 extern "C" {
     fn hts_open(fn_: *const c_char, mode: *const c_char) -> *mut htsFile;
-    fn hts_open_format(
-        fn_: *const c_char,
-        mode: *const c_char,
-        fmt: *const htsFormat,
-    ) -> *mut htsFile;
+    fn hts_open_format(fn_: *const c_char, mode: *const c_char, fmt: *const htsFormat) -> *mut htsFile;
     fn hts_close(fp_: *mut htsFile) -> c_int;
     fn hts_set_threads(fp_: *mut htsFile, t_: c_int) -> c_int;
     fn hts_get_format(fp_: *const htsFile) -> *mut htsFormat;
     fn sam_index_load(fp_: *mut htsFile, name: *const c_char) -> *mut hts_idx_t;
     fn hts_set_fai_filename(fp_: *mut htsFile, fn_aux: *const c_char) -> c_int;
     fn hts_itr_destroy(iter: *mut hts_itr_t);
-    fn sam_itr_queryi(
-        idx: *const hts_idx_t,
-        tid: c_int,
-        start: HtsPos,
-        end: HtsPos,
-    ) -> *mut hts_itr_t;
-    fn sam_itr_regarray(
-        idx: *const hts_idx_t,
-        hdr: *mut sam_hdr_t,
-        regarray: *const *const c_char,
-        count: c_uint,
-    ) -> *mut hts_itr_t;
+    fn sam_itr_queryi(idx: *const hts_idx_t, tid: c_int, start: HtsPos, end: HtsPos) -> *mut hts_itr_t;
+    fn sam_itr_regarray(idx: *const hts_idx_t, hdr: *mut sam_hdr_t, regarray: *const *const c_char, count: c_uint) -> *mut hts_itr_t;
     fn hts_itr_multi_next(fp: *mut htsFile, itr: *mut hts_itr_t, r: *mut c_void) -> c_int;
-    fn hts_itr_next(fp: *mut BGZF, itr: *mut hts_itr_t, r: *mut c_void, data: *mut c_void)
-        -> c_int;
+    fn hts_itr_next(fp: *mut BGZF, itr: *mut hts_itr_t, r: *mut c_void, data: *mut c_void) -> c_int;
     fn hts_parse_format(format: *mut htsFormat, str: *const c_char) -> c_int;
     fn hts_opt_free(opts: *mut hts_opt);
     fn hts_opt_add(opts: *mut *mut hts_opt, c_arg: *const c_char) -> c_int;
@@ -249,9 +272,30 @@ pub struct HtsFile {
 
 unsafe impl Send for HtsFile {}
 
+impl Deref for HtsFile {
+    type Target = htsFile;
+    #[inline]
+    fn deref(&self) -> &htsFile { unsafe{self.inner.as_ref()} }
+}
+
+impl DerefMut for HtsFile {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut htsFile {unsafe{ self.inner.as_mut() }}
+}
+
+impl AsRef<htsFile> for HtsFile {
+    #[inline]
+    fn as_ref(&self) -> &htsFile { self}
+}
+
+impl AsMut<htsFile> for HtsFile {
+    #[inline]
+    fn as_mut(&mut self) -> &mut htsFile { self}
+}
+
 impl Drop for HtsFile {
     fn drop(&mut self) {
-        unsafe { hts_close(self.inner_mut()) };
+        unsafe { hts_close(self.as_mut()) };
     }
 }
 
@@ -287,15 +331,9 @@ impl HtsFile {
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
-    pub(crate) fn inner(&self) -> &htsFile {
-        unsafe { self.inner.as_ref() }
-    }
-    pub(crate) fn inner_mut(&mut self) -> &mut htsFile {
-        unsafe { self.inner.as_mut() }
-    }
 
     pub fn set_threads(&mut self, t: usize) -> io::Result<()> {
-        let ret = unsafe { hts_set_threads(self.inner_mut(), t as c_int) };
+        let ret = unsafe { hts_set_threads(self.as_mut(), t as c_int) };
         if ret != 0 {
             Err(hts_err(format!(
                 "Failed to set additional threads to file {}",
@@ -305,17 +343,10 @@ impl HtsFile {
             Ok(())
         }
     }
-    pub fn format(&self) -> HtsFormat {
-        HtsFormat {
-            inner: NonNull::new(unsafe { hts_get_format(self.inner()) })
-                .expect("hts_get_format returned NULL"),
-            phantom: PhantomData,
-            owned: false,
-        }
-    }
+
     pub fn sam_index_load(&mut self) -> io::Result<HtsIndex> {
         match NonNull::new(unsafe {
-            sam_index_load(self.inner_mut(), get_cstr(&self.name).as_ptr())
+            sam_index_load(self.as_mut(), get_cstr(&self.name).as_ptr())
         }) {
             None => Err(hts_err(format!(
                 "Couldn't load SAM index for file {}",
@@ -327,9 +358,10 @@ impl HtsFile {
             }),
         }
     }
+
     pub fn set_fai_filename<S: AsRef<str>>(&mut self, name: S) -> io::Result<()> {
         let name = name.as_ref();
-        let ret = unsafe { hts_set_fai_filename(self.inner_mut(), get_cstr(name).as_ptr()) };
+        let ret = unsafe { hts_set_fai_filename(self.as_mut(), get_cstr(name).as_ptr()) };
         if ret != 0 {
             Err(hts_err(format!(
                 "Failed to attach reference index {} to file {}",
@@ -383,7 +415,7 @@ impl HtsIndex {
         let it = NonNull::new(unsafe {
             sam_itr_regarray(
                 self.inner(),
-                hdr.inner_mut(),
+                hdr.as_mut(),
                 parray.as_ptr(),
                 count as c_uint,
             )
@@ -458,34 +490,115 @@ impl HtsFormat {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum HtsItrType {
-    SamItr,
-    TbxItr,
+pub enum HtsItrRec {
+    BamRec(bam1_t),
+    KStr(kstring_t),
+    BcfRec(bcf1_t),
 }
 
-pub struct HtsItr {
+pub enum HtsItrType<'a> {
+    SamItr,
+    TbxItr(&'a mut tbx_t),
+    VcfItr,
+    None,
+}
+
+impl <'a> HtsItrType<'a> {
+    pub fn take(&mut self) -> HtsItrType<'a> {
+        std::mem::replace(self, Self::None)
+    }
+}
+
+pub struct HtsItr<'a> {
     inner: NonNull<hts_itr_t>,
-    itr_type: HtsItrType,
+    itr_type: HtsItrType<'a>,
     phantom: PhantomData<hts_itr_t>,
 }
 
-unsafe impl Send for HtsItr {}
+impl <'a>Deref for HtsItr<'a> {
+    type Target = hts_itr_t;
+    #[inline]
+    fn deref(&self) -> &hts_itr_t { unsafe{self.inner.as_ref()} }
+}
 
-impl Drop for HtsItr {
+impl <'a>DerefMut for HtsItr<'a> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut hts_itr_t {unsafe{ self.inner.as_mut() }}
+}
+
+impl <'a>AsRef<hts_itr_t> for HtsItr<'a> {
+    #[inline]
+    fn as_ref(&self) -> &hts_itr_t { self}
+}
+
+impl <'a>AsMut<hts_itr_t> for HtsItr<'a> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut hts_itr_t { self}
+}
+
+unsafe impl <'a> Send for HtsItr<'a> {}
+
+impl <'a>Drop for HtsItr<'a> {
     fn drop(&mut self) {
         unsafe { hts_itr_destroy(self.inner.as_ptr()) };
     }
 }
 
-impl HtsItr {
-    pub fn new(itr: *mut hts_itr_t, itr_type: HtsItrType) -> Option<Self> { NonNull::new(itr).map(|p| HtsItr{ inner: p, itr_type, phantom: PhantomData}) }
+impl <'a> HtsItr<'a> {
+    pub fn new(itr: *mut hts_itr_t, itr_type: HtsItrType<'a>) -> Option<Self> {
+        if matches!(itr_type, HtsItrType::None) {
+            None
+        } else {
+            NonNull::new(itr).map(|p| HtsItr { inner: p, itr_type, phantom: PhantomData })
+        }
+    }
 
+    pub fn next(&mut self, fp: &mut HtsFile, rec: &mut HtsItrRec) -> io::Result<bool> {
+
+       let i = if matches!(self.itr_type, HtsItrType::SamItr) && self.as_ref().multi() != 0 {
+            if let HtsItrRec::BamRec(b) = rec {
+                unsafe { hts_itr_multi_next(fp.as_mut(), self.as_mut(), b as *mut bam1_t as *mut c_void) }
+            } else {
+                return Err(hts_err("Wrong record type for HtsItr::next()".to_string()))
+            }
+        } else {
+            let bgfp = if fp.as_ref().is_bgzf() != 0 {
+                fp.as_ref().fp as *mut BGZF
+            } else {
+                null_mut::<BGZF>()
+            };
+            match (&mut self.itr_type, rec) {
+                (HtsItrType::SamItr, HtsItrRec::BamRec(b)) => {
+                    unsafe {hts_itr_next(bgfp, self.as_mut(), b as *mut bam1_t as *mut c_void, fp.as_mut() as *mut htsFile as *mut c_void)}
+                },
+                (HtsItrType::VcfItr, HtsItrRec::BcfRec(b)) if !bgfp.is_null() => {
+                    unsafe {hts_itr_next(bgfp, self.as_mut(), b as *mut bcf1_t as *mut c_void, null_mut())}
+                },
+                (HtsItrType::TbxItr(_), HtsItrRec::KStr(s)) if !bgfp.is_null() => {
+                    let mut t = self.itr_type.take();
+                    let tbx = if let HtsItrType::TbxItr(tx) = &mut t { tx } else { panic!("Wrong HtsItrType") };
+                    let j = unsafe {hts_itr_next(bgfp, self.as_mut(), s as *mut kstring_t as *mut c_void, *tbx as *mut tbx_t as *mut c_void)};
+                    self.itr_type = t;
+                    j
+                },
+                (HtsItrType::VcfItr, _) | (HtsItrType::TbxItr(_), _) if bgfp.is_null() => return Err(hts_err("Only bgzf compressed files can be used with iterators".to_string())),
+                _ => return Err(hts_err("Wrong record type for HtsItr::next()".to_string())),
+            }
+        };
+        if i >= 0 {
+            Ok(true)
+        } else if i == -1 {
+            Ok(false)
+        } else {
+            Err(hts_err("Error reading record".to_string()))
+        }
+    }
+/*
     pub fn sam_itr_next(&mut self, fp: &mut HtsFile, mut brec: BamRec) -> SamReadResult {
         if self.itr_type != HtsItrType::SamItr {
             return SamReadResult::Error
         }
-        let p = brec.inner_mut();
+        let p = brec.as_mut();
         match unsafe {
             if (*self.inner.as_ref()).multi() != 0 {
                 hts_itr_multi_next(
@@ -510,5 +623,5 @@ impl HtsItr {
             -1 => SamReadResult::EOF,
             _ => SamReadResult::Error,
         }
-    }
+    } */
 }

@@ -70,7 +70,7 @@ impl VcfHeader {
         }
     }
     pub fn write(&mut self, hout: &mut HtsFile) -> io::Result<()> {
-        match unsafe { bcf_hdr_write(hout.inner_mut(), self.inner_mut()) } {
+        match unsafe { bcf_hdr_write(hout.as_mut(), self.inner_mut()) } {
             0 => Ok(()),
             _ => Err(hts_err("Error writing VCF/BCF header".to_string())),
         }
@@ -141,7 +141,7 @@ pub const bcf_str_missing: usize = 0x07;
 
 #[repr(C)]
 #[derive(BitfieldStruct)]
-struct bcf1_t {
+pub struct bcf1_t {
     pos: HtsPos,
     rlen: HtsPos,
     rid: i32,
@@ -208,7 +208,7 @@ impl BcfRec {
         self.inner_mut().qual = qual
     }
     pub fn write(&mut self, file: &mut HtsFile, hdr: &mut VcfHeader) -> io::Result<()> {
-        if unsafe { bcf_write(file.inner_mut(), hdr.inner_mut(), self.inner_mut()) } < 0 {
+        if unsafe { bcf_write(file.as_mut(), hdr.inner_mut(), self.inner_mut()) } < 0 {
             Err(hts_err("Error writing out VCF record".to_string()))
         } else {
             Ok(())

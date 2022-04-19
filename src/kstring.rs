@@ -1,10 +1,10 @@
-use std::convert::TryInto;
 use std::ptr::null_mut;
 
 use super::*;
 use libc::{c_char, c_float, c_int, c_void, size_t};
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct kstring_t {
     l: size_t,
     m: size_t,
@@ -38,20 +38,24 @@ impl kstring_t {
     pub fn new() -> Self {
         Self::default()
     }
+
     pub fn initialize(&mut self) {
         self.l = 0;
         self.m = 0;
         self.s = null_mut::<c_char>();
     }
+
     pub fn free(&mut self) {
         if !self.s.is_null() {
             unsafe { libc::free(self.s as *mut c_void) }
         }
         self.initialize();
     }
+
     pub fn clear(&mut self) {
         self.l = 0
     }
+
     pub fn resize(&mut self, size: size_t) -> bool {
         if self.m < size {
             let size = if size > (usize::MAX >> 2) {
@@ -68,10 +72,7 @@ impl kstring_t {
         }
         false
     }
-    //	fn expand(&mut self, expansion: size_t) -> bool {
-    //		let new_size = self.l + expansion;
-    //		if new_size < self.l { true } else { self.resize(new_size) }
-    //	}
+
     pub fn putsn(&mut self, p: *const c_char, l: size_t) -> bool {
         let new_sz = self.l + l + 2;
         if new_sz <= self.l || self.resize(new_sz) {
@@ -86,22 +87,7 @@ impl kstring_t {
             false
         }
     }
-    pub fn putsn_(&mut self, p: *const c_char, l: size_t) -> bool {
-        let new_sz = self.l + l + 1;
-        if new_sz <= self.l || self.resize(new_sz) {
-            true
-        } else {
-            unsafe {
-                libc::memcpy(
-                    self.s.offset(self.l.try_into().unwrap()) as *mut c_void,
-                    p as *const c_void,
-                    l,
-                );
-            }
-            self.l += l;
-            false
-        }
-    }
+
     pub fn putc(&mut self, c: c_char) -> bool {
         if self.resize(self.l + 2) {
             true
@@ -115,18 +101,7 @@ impl kstring_t {
             false
         }
     }
-    pub fn putc_(&mut self, c: c_char) -> bool {
-        if self.resize(self.l + 1) {
-            true
-        } else {
-            let l = self.l as isize;
-            unsafe {
-                *(self.s.offset(l)) = c;
-            }
-            self.l += 1;
-            false
-        }
-    }
+
     pub fn bcf_enc_size(&mut self, size: c_int, bcf_type: u8) -> bool {
         if size >= 15 {
             self.putc((15 << 4 | bcf_type) as c_char)
@@ -181,6 +156,13 @@ impl kstring_t {
             None
         } else {
             Some(from_cstr(self.s))
+        }
+    }
+    pub fn to_cstr(&self) -> Option<&CStr> {
+        if self.s.is_null() {
+            None
+        } else {
+            Some(unsafe {CStr::from_ptr(self.s) })
         }
     }
 }

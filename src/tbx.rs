@@ -63,8 +63,8 @@ impl tbx_t {
          Some(v)
       }
    }
-   pub fn tbx_itr_queryi(&self, tid: c_int, beg: HtsPos, end: HtsPos) -> io::Result<HtsItr> {
-      HtsItr::new(unsafe {hts_itr_query(self.index, tid, beg, end, tbx_readrec)}, HtsItrType::TbxItr).ok_or_else(|| hts_err("Failed to obtain tbx iterator".to_string()))
+   pub fn tbx_itr_queryi(&mut self, tid: c_int, beg: HtsPos, end: HtsPos) -> io::Result<HtsItr> {
+      HtsItr::new(unsafe {hts_itr_query(self.index, tid, beg, end, tbx_readrec)}, HtsItrType::TbxItr(self)).ok_or_else(|| hts_err("Failed to obtain tbx iterator".to_string()))
    }
    pub fn name2id(&self, s: &CStr) -> io::Result<usize> {
       let x = unsafe { tbx_name2id(self, s.as_ptr())};
