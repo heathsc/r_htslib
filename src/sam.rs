@@ -255,11 +255,19 @@ pub struct bam1_t {
 }
 
 impl bam1_t {
-   pub fn qname(&self) -> Option<&CStr> {
+   pub fn qname_cstr(&self) -> Option<&CStr> {
       if self.data.is_null() {
          None
       } else {
          Some(unsafe { CStr::from_ptr(self.data)})
+      }
+   }
+
+   pub fn qname(&self) -> Option<&str> {
+      if self.data.is_null() {
+         None
+      } else {
+         Some(from_cstr(self.data))
       }
    }
 
