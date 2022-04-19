@@ -886,7 +886,7 @@ impl BamRec {
       }
    }
 
-   pub fn read(mut self, hfile: &mut HtsFile, hdr: &mut SamHeader) -> io::Result<bool> {
+   pub fn read(&mut self, hfile: &mut HtsFile, hdr: &mut SamHeader) -> io::Result<bool> {
       match unsafe { sam_read1(hfile.as_mut(), hdr.as_mut(), self.as_mut()) } {
          0..=c_int::MAX => Ok(true),
          -1 => Ok(false),

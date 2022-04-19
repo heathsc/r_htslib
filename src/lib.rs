@@ -28,7 +28,7 @@ fn from_cstr<'a>(cstr: *const i8) -> &'a str {
     unsafe {
         CStr::from_ptr(cstr)
             .to_str()
-            .expect("Reference name not UTF8")
+            .expect("String not UTF8")
     }
 }
 
