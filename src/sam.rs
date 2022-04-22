@@ -4,9 +4,10 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::str::FromStr;
 use std::ffi::CStr;
+
 use std::{fmt, io, ptr};
 
-use super::{from_cstr, get_cstr, htsFile, hts_err, kstring_t, HtsFile, HtsPos};
+use super::{from_cstr, get_cstr, htsFile, hts_err, kstring_t, HtsFile, HtsPos, HtsHdr, HtsRead};
 use libc::{c_char, c_int, size_t};
 
 pub const BAM_FPAIRED: u16 = 1;
@@ -45,6 +46,7 @@ extern "C" {
    fn bam_aux_update_str(pt_: *mut bam1_t, tag_: *const c_char, len_: c_int, data_: *const c_char, ) -> c_int;
    fn sam_read1(fp_: *mut htsFile, hd_: *mut sam_hdr_t, b_: *mut bam1_t) -> c_int;
    fn sam_write1(fp_: *mut htsFile, hd_: *mut sam_hdr_t, b_: *const bam1_t) -> c_int;
+   fn sam_format1(hdr: *const sam_hdr_t, b: *const bam1_t, s: *mut kstring_t) -> c_int;
    fn sam_open_mode(mode: *mut c_char, fn_: *const c_char, fmt: *const c_char) -> c_int;
    fn sam_hdr_change_HD(hd: *mut sam_hdr_t, key: *const c_char, val: *const c_char);
    fn sam_hdr_find_line_id(hd: *mut sam_hdr_t, type_: *const c_char, id_key: *const c_char, id_val: *const c_char, ks: *mut kstring_t, ) -> c_int;
@@ -467,6 +469,10 @@ impl bam1_t {
       }
       Ok(SeqQual(sq.into_boxed_slice()))
    }
+
+   pub fn format(&mut self, hdr: &SamHeader, s: &mut kstring_t) -> c_int {
+      unsafe { sam_format1(hdr.as_ref(), self, s) }
+   }
 }
 
 #[derive(Debug)]
@@ -496,11 +502,9 @@ impl AsMut<sam_hdr_t> for SamHeader {
    fn as_mut(&mut self) -> &mut sam_hdr_t { self}
 }
 
-unsafe impl Send for SamHeader {}
-
 impl Drop for SamHeader {
    fn drop(&mut self) {
-      unsafe { sam_hdr_destroy(self.inner.as_ptr()) };
+      unsafe { sam_hdr_destroy(self.as_mut()) };
    }
 }
 
@@ -522,10 +526,7 @@ impl SamHeader {
 
    pub fn read(hts_file: &mut HtsFile) -> io::Result<Self> {
       match NonNull::new(unsafe { sam_hdr_read(hts_file.as_mut()) }) {
-         None => Err(hts_err(format!(
-            "Failed to load header from {}",
-            hts_file.name()
-         ))),
+         None => Err(hts_err(format!("Failed to load header from {}", hts_file.name()))),
          Some(p) => Ok(Self {
             inner: p,
             phantom: PhantomData,
@@ -822,6 +823,22 @@ impl AsMut<bam1_t> for BamRec {
 
 unsafe impl Send for BamRec {}
 
+impl HtsRead for BamRec {
+   fn read(&mut self, fp: &mut HtsFile, hdr: Option<&mut HtsHdr>) -> io::Result<bool> {
+      let hts_file = unsafe { fp.inner.as_mut() };
+      let res = if let Some(HtsHdr::Sam(hd)) = hdr {
+         match unsafe { sam_read1(hts_file, hd.as_mut(), self.as_mut()) } {
+            0..=c_int::MAX => Ok(true),
+            -1 => Ok(false),
+            _ => Err(hts_err("Error reading SAM/BAM record".to_string())),
+         }
+      } else {
+         Err(hts_err(format!("Appropriate header not found for file {}", fp.name())))
+      };
+      res
+   }
+}
+
 impl Drop for BamRec {
    fn drop(&mut self) {
       unsafe { bam_destroy1(self.as_mut()) }
@@ -894,16 +911,21 @@ impl BamRec {
       }
    }
 
-   pub fn read(&mut self, hfile: &mut HtsFile, hdr: &mut SamHeader) -> io::Result<bool> {
-      match unsafe { sam_read1(hfile.as_mut(), hdr.as_mut(), self.as_mut()) } {
-         0..=c_int::MAX => Ok(true),
-         -1 => Ok(false),
-         _ => Err(hts_err("Error reading SAM/BAM record".to_string())),
-      }
-   }
-
    pub fn swap(&mut self, other: &mut Self) {
       std::mem::swap(&mut self.inner, &mut other.inner)
+   }
+
+   pub fn format(&mut self, hdr: &mut HtsHdr, s: &mut kstring_t) -> io::Result<()>{
+      if let HtsHdr::Sam(h) = hdr {
+         let e= self.as_mut().format(h, s);
+         if e >= 0 {
+            Ok(())
+         } else {
+            Err(hts_err(format!("Error formatting SAM record: err {}", e)))
+         }
+      } else {
+         Err(hts_err("Wrong header type for SAM/BAM/CRAM format".to_string()))
+      }
    }
 }
 

@@ -1,4 +1,5 @@
-use std::ptr::null_mut;
+use std::ptr::NonNull;
+use std::marker::PhantomData;
 
 use super::*;
 use libc::{c_char, c_float, c_int, c_void, size_t};
@@ -8,7 +9,8 @@ use libc::{c_char, c_float, c_int, c_void, size_t};
 pub struct kstring_t {
     l: size_t,
     m: size_t,
-    s: *mut c_char,
+    s: Option<NonNull<c_char>>,
+    phantom: PhantomData<kstring_t>,
 }
 
 impl Default for kstring_t {
@@ -16,14 +18,17 @@ impl Default for kstring_t {
         Self {
             l: 0,
             m: 0,
-            s: null_mut::<c_char>(),
+            s: None,
+            phantom: PhantomData,
         }
     }
 }
 
 impl Drop for kstring_t {
     fn drop(&mut self) {
-        self.free()
+        if let Some(p) = self.s {
+            unsafe { libc::free(p.as_ptr() as *mut c_void) }
+        }
     }
 }
 
@@ -35,26 +40,9 @@ extern "C" {
 }
 
 impl kstring_t {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
-    pub fn initialize(&mut self) {
-        self.l = 0;
-        self.m = 0;
-        self.s = null_mut::<c_char>();
-    }
-
-    pub fn free(&mut self) {
-        if !self.s.is_null() {
-            unsafe { libc::free(self.s as *mut c_void) }
-        }
-        self.initialize();
-    }
-
-    pub fn clear(&mut self) {
-        self.l = 0
-    }
+    pub fn clear(&mut self) { self.l = 0 }
 
     pub fn resize(&mut self, size: size_t) -> bool {
         if self.m < size {
@@ -63,11 +51,13 @@ impl kstring_t {
             } else {
                 size + (size >> 1)
             };
-            let tmp = unsafe { libc::realloc(self.s as *mut c_void, size) };
-            if tmp.is_null() {
-                return true;
-            }
-            self.s = tmp as *mut c_char;
+            let p = NonNull::new(if let Some(ptr) = &mut self.s {
+                unsafe { libc::realloc(ptr.as_ptr() as *mut c_void, size) }
+            } else {
+                unsafe { libc::malloc(size) }
+            }).map(|x| x.cast::<c_char>());
+            if p.is_none() { return true }
+            self.s = p;
             self.m = size;
         }
         false
@@ -80,9 +70,10 @@ impl kstring_t {
         } else {
             let l1 = self.l as isize;
             unsafe {
-                libc::memcpy(self.s.offset(l1) as *mut c_void, p as *const c_void, l);
+                let ptr = self.s.unwrap().as_ptr().offset(l1);
+                libc::memcpy(ptr as *mut c_void, p as *const c_void, l);
                 self.l += l;
-                *(self.s.offset(l1 + l as isize)) = 0;
+                *(ptr.offset(l as isize)) = 0;
             }
             false
         }
@@ -94,8 +85,9 @@ impl kstring_t {
         } else {
             let l = self.l as isize;
             unsafe {
-                *(self.s.offset(l)) = c;
-                *(self.s.offset(l + 1)) = 0;
+                let ptr = self.s.unwrap().as_ptr();
+                *(ptr.offset(l)) = c;
+                *(ptr.offset(l + 1)) = 0;
             }
             self.l += 1;
             false
@@ -152,17 +144,9 @@ impl kstring_t {
         unsafe { bcf_enc_vfloat(self as *mut kstring_t, v.len() as c_int, v.as_ptr()) < 0 }
     }
     pub fn to_str(&self) -> Option<&str> {
-        if self.s.is_null() {
-            None
-        } else {
-            Some(from_cstr(self.s))
-        }
+        self.s.map(|s| from_cstr(s.as_ptr()).trim_end())
     }
     pub fn to_cstr(&self) -> Option<&CStr> {
-        if self.s.is_null() {
-            None
-        } else {
-            Some(unsafe {CStr::from_ptr(self.s) })
-        }
+        self.s.map(|s| unsafe { CStr::from_ptr(s.as_ptr())})
     }
 }
