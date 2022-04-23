@@ -299,15 +299,14 @@ extern "C" {
     fn hts_opt_add(opts: *mut *mut hts_opt, c_arg: *const c_char) -> c_int;
 }
 
-pub struct Hts<'a> {
+pub struct Hts {
     pub(crate) hts_file: HtsFile,
     pub(crate) header: Option<HtsHdr>,
-    thread_pool: Option<&'a HtsThreadPool>,
 }
 
-unsafe impl<'a> Send for Hts<'a> {}
+unsafe impl Send for Hts {}
 
-impl <'a>Hts<'a> {
+impl Hts {
     pub fn open<S: AsRef<str>>(name: S, mode: &str) -> io::Result<Self> {
         Self::open_format_(name, mode, None)
     }
@@ -329,7 +328,6 @@ impl <'a>Hts<'a> {
         Ok(Self {
             hts_file: fp,
             header,
-            thread_pool: None,
         })
     }
 
@@ -341,12 +339,6 @@ impl <'a>Hts<'a> {
 
     pub fn hts_file_and_header(&mut self) -> (&mut HtsFile, Option<&mut HtsHdr>) {
         (&mut self.hts_file, self.header.as_mut())
-    }
-
-    pub fn set_thread_pool(&mut self, tp: &'a HtsThreadPool) -> io::Result<()> {
-        self.hts_file.set_thread_pool(tp)?;
-        self.thread_pool = Some(tp);
-        Ok(())
     }
 
     pub fn index_load(&mut self) -> io::Result<HtsIndex> {
