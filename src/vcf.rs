@@ -4,9 +4,12 @@ use std::ptr::NonNull;
 use std::ops::{Deref, DerefMut};
 use std::convert::{AsRef, AsMut};
 
-use super::{from_cstr, get_cstr, htsFile, hts_err, kstring_t, HtsFile, HtsPos, HtsHdr, HtsRead};
+use super::{
+    from_cstr, get_cstr, htsFile, hts_err, kstring_t, Hts, HtsFile, HtsPos, HtsHdr,
+    HtsRead, HtsItr, BGZF, bgzf_getline, hts_itr_next, htsExactFormat, HtsFileDesc
+};
 use c2rust_bitfields::BitfieldStruct;
-use libc::{c_char, c_int};
+use libc::{c_char, c_int, c_void};
 
 pub const BCF_DT_ID: u32 = 0;
 pub const BCF_DT_CTG: u32 = 1;
@@ -28,14 +31,17 @@ extern "C" {
     fn bcf_hdr_sync(hdr: *mut bcf_hdr_t) -> c_int;
     fn bcf_init() -> *mut bcf1_t;
     fn bcf_read(fp: *mut htsFile, hdr: *const bcf_hdr_t, v: *mut bcf1_t) -> c_int;
+    pub (crate) fn bcf_readrec(fp: *mut BGZF, tbxv: *mut c_void, sv: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int;
     fn bcf_destroy(bcf: *mut bcf1_t);
     fn bcf_clear(bcf: *mut bcf1_t);
     fn bcf_write(hfile: *mut htsFile, hdr: *mut bcf_hdr_t, brec: *mut bcf1_t) -> c_int;
     fn bcf_hdr_read(fp: *mut htsFile) -> *mut bcf_hdr_t;
     fn bcf_hdr_destroy(hdr: *mut bcf_hdr_t);
     fn vcf_format(hdr: *const bcf_hdr_t, v: *mut bcf1_t, s: *mut kstring_t) -> c_int;
+    fn vcf_parse(s: *mut kstring_t, hdr: *const bcf_hdr_t, v: *mut bcf1_t) -> c_int;
 }
 
+#[derive(Debug)]
 pub struct VcfHeader {
     inner: NonNull<bcf_hdr_t>,
     phantom: PhantomData<bcf_hdr_t>,
@@ -267,6 +273,7 @@ impl bcf1_t {
 pub struct BcfRec {
     inner: NonNull<bcf1_t>,
     phantom: PhantomData<bcf1_t>,
+    line: kstring_t,
 }
 
 unsafe impl Send for BcfRec {}
@@ -293,8 +300,9 @@ impl AsMut<bcf1_t> for BcfRec {
 }
 
 impl HtsRead for BcfRec {
-    fn read(&mut self, fp: &mut HtsFile, hdr: Option<&mut HtsHdr>) -> io::Result<bool> {
-        let hts_file = unsafe { fp.inner.as_mut() };
+    fn read(&mut self, hts: &mut Hts) -> io::Result<bool> {
+        let (fp, hdr) = hts.hts_file_and_header();
+        let hts_file = fp.as_mut();
         let res = if let Some(HtsHdr::Vcf(hd)) = &hdr {
             let i = unsafe { bcf_read(hts_file, hd.as_ref(), self.as_mut()) };
             match i {
@@ -312,7 +320,7 @@ impl HtsRead for BcfRec {
 impl BcfRec {
     pub fn new() -> io::Result<Self> {
         match NonNull::new(unsafe { bcf_init() }) {
-            Some(b) => Ok(Self { inner: b, phantom: PhantomData }),
+            Some(b) => Ok(Self { inner: b, phantom: PhantomData, line: kstring_t::new() }),
             None => Err(hts_err("Failed to allocate new BcfRec".to_string())),
         }
     }
@@ -353,10 +361,57 @@ impl BcfRec {
         }
     }
 
+    pub fn read_itr(&mut self, hts: &mut Hts, itr: &mut HtsItr) -> io::Result<bool> {
+        let (fp, hdr) = hts.hts_file_and_header();
+        if let Some(HtsFileDesc::Bgzf(bgzf)) = fp.file_desc() {
+            if let Some(HtsHdr::Vcf(h)) = hdr {
+                match unsafe { hts_itr_next(
+                    bgzf.as_ptr(),
+                    itr.as_mut(),
+                    self as *mut BcfRec as *mut c_void,
+                    h.as_mut() as *mut bcf_hdr_t as *mut c_void,
+                )} {
+                    0..=c_int::MAX => Ok(true),
+                    -1 => Ok(false),
+                    _ => Err(hts_err("Error reading VCF/BCF record".to_string())),
+                }
+            } else {
+                Err(hts_err(format!("Appropriate header not found for file {}", fp.name())))
+            }
+        } else {
+            Err(hts_err(format!("File {} is not in bgzf format (required for indexing)", fp.name())))
+        }
+    }
 }
 
 impl Drop for BcfRec {
     fn drop(&mut self) {
         unsafe { bcf_destroy(self.inner.as_ptr()) }
+    }
+}
+
+pub (crate) unsafe extern "C" fn vcf_read_itr(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int {
+    let hdr = NonNull::new(data as *mut bcf_hdr_t).unwrap().as_ref();
+    let bcf_rec = NonNull::new(r as *mut BcfRec).unwrap().as_mut();
+    match bgzf_getline(fp, b'\n' as c_int, &mut bcf_rec.line) {
+        c if c >= 0 => {
+            match unsafe { vcf_parse(&mut bcf_rec.line, hdr, bcf_rec.as_mut())} {
+                0 => {
+                    *tid = bcf_rec.rid;
+                    *beg = bcf_rec.pos;
+                    *end = bcf_rec.pos + bcf_rec.rlen;
+                    c
+                },
+                c => c,
+            }
+        },
+        c => c,
+    }
+}
+
+pub (crate) unsafe extern "C" fn bcf_read_itr(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int {
+    let bcf_rec = NonNull::new(r as *mut BcfRec).unwrap().as_mut();
+    unsafe {
+        bcf_readrec(fp, data, bcf_rec.as_mut() as *mut bcf1_t as *mut c_void, tid, beg, end)
     }
 }

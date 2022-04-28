@@ -8,7 +8,10 @@ use std::marker::PhantomData;
 use std::ptr::{null_mut, null, NonNull};
 use std::ops::{Deref, DerefMut};
 
-use crate::{tbx_index_load3, VcfHeader, SamHeader, Tbx};
+use crate::{
+    tbx_index_load3, VcfHeader, SamHeader, Tbx, tbx_readrec,
+    vcf_read_itr, bcf_read_itr, tbx_read_itr
+};
 
 pub type HtsPos = i64;
 
@@ -16,6 +19,8 @@ pub const HTS_IDX_NOCOOR: HtsPos = -2;
 pub const HTS_IDX_START: HtsPos = -3;
 pub const HTS_IDX_REST: HtsPos = -4;
 pub const HTS_IDX_NONE: HtsPos = -5;
+
+pub const HTS_IDX_SILENT_FAIL: c_int = 2;
 
 pub const HTS_FMT_CSI: c_int = 0;
 pub const HTS_FMT_BAI: c_int = 1;
@@ -68,7 +73,7 @@ pub struct htsFile {
     line: kstring_t,
     fn_: NonNull<c_char>,
     fn_aux: *mut c_char,
-    fp: *mut c_void,
+    pub (crate) fp: *mut c_void,
     state: *mut c_void,
     format: htsFormat,
     idx: *mut hts_idx_t,
@@ -177,7 +182,7 @@ pub struct hts_itr_t {
     bins: HtsItrBins,
 }
 
-pub type HtsReadrecFunc = unsafe extern fn(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos);
+pub type HtsReadrecFunc = unsafe extern fn(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int;
 pub type HtsSeekFunc = unsafe extern fn(fp: *mut c_void, offset: i64, where_: c_int);
 pub type HtsTellFunc = unsafe extern fn(fp: *mut c_void);
 
@@ -278,6 +283,10 @@ impl Drop for htsFormat {
     }
 }
 
+impl htsFormat {
+    pub fn format(&self) -> &htsExactFormat { &self.format }
+}
+
 #[link(name = "hts")]
 extern "C" {
     fn hts_open_format(fn_: *const c_char, mode: *const c_char, fmt: *const htsFormat) -> *mut prehtsFile;
@@ -288,20 +297,24 @@ extern "C" {
     fn hts_tpool_destroy(p: *mut hts_tpool);
     fn sam_index_load3(fp_: *mut htsFile, name: *const c_char, fnidx: *const c_char, flags: c_int) -> *mut hts_idx_t;
     fn hts_idx_load3(name: *const c_char, fnidx: *const c_char, fmt: c_int, flags : c_int) -> *mut hts_idx_t;
+    fn hts_idx_destroy(idx: *mut hts_idx_t);
     fn hts_set_fai_filename(fp_: *mut htsFile, fn_aux: *const c_char) -> c_int;
     fn hts_itr_destroy(iter: *mut hts_itr_t);
+    fn hts_itr_query(idx: *const hts_idx_t, tid: c_int, begin: HtsPos, end: HtsPos, readrec: HtsReadrecFunc) -> *mut hts_itr_t;
     fn sam_itr_queryi(idx: *const hts_idx_t, tid: c_int, start: HtsPos, end: HtsPos) -> *mut hts_itr_t;
-    fn sam_itr_regarray(idx: *const hts_idx_t, hdr: *mut sam_hdr_t, regarray: *const *const c_char, count: c_uint) -> *mut hts_itr_t;
-    fn hts_itr_multi_next(fp: *mut htsFile, itr: *mut hts_itr_t, r: *mut c_void) -> c_int;
-    fn hts_itr_next(fp: *mut BGZF, itr: *mut hts_itr_t, r: *mut c_void, data: *mut c_void) -> c_int;
+//    fn sam_itr_regarray(idx: *const hts_idx_t, hdr: *mut sam_hdr_t, regarray: *const *const c_char, count: c_uint) -> *mut hts_itr_t;
+    pub (crate) fn hts_itr_multi_next(fp: *mut htsFile, itr: *mut hts_itr_t, r: *mut c_void) -> c_int;
+    pub(crate) fn hts_itr_next(fp: *mut BGZF, itr: *mut hts_itr_t, r: *mut c_void, data: *mut c_void) -> c_int;
     fn hts_parse_format(format: *mut htsFormat, str: *const c_char) -> c_int;
     fn hts_opt_free(opts: *mut hts_opt);
     fn hts_opt_add(opts: *mut *mut hts_opt, c_arg: *const c_char) -> c_int;
+    pub(crate) fn bgzf_getline(fp: *mut BGZF, delim: c_int, str: *mut kstring_t) -> c_int;
 }
 
 pub struct Hts {
     pub(crate) hts_file: HtsFile,
     pub(crate) header: Option<HtsHdr>,
+    pub(crate) idx: Option<HtsIndex>,
 }
 
 unsafe impl Send for Hts {}
@@ -321,13 +334,14 @@ impl Hts {
         let header = if fp.as_ref().is_write() == 0 {
             match fp.format().format {
                 htsExactFormat::Sam | htsExactFormat::Bam | htsExactFormat::Cram => Some(HtsHdr::Sam(SamHeader::read(&mut fp)?)),
-                htsExactFormat::Vcf | htsExactFormat::Bcf => Some(HtsHdr::Vcf(VcfHeader::read(&mut fp)?)),
+                htsExactFormat::Bcf | htsExactFormat::Vcf => Some(HtsHdr::Vcf(VcfHeader::read(&mut fp)?)),
                 _ => if let Ok(tbx) = Tbx::load(name) { Some(HtsHdr::Tbx(tbx)) } else { None }
             }
         } else { None };
         Ok(Self {
             hts_file: fp,
             header,
+            idx: None,
         })
     }
 
@@ -341,18 +355,22 @@ impl Hts {
         (&mut self.hts_file, self.header.as_mut())
     }
 
-    pub fn index_load(&mut self) -> io::Result<HtsIndex> {
+    pub fn index_load(&mut self) -> io::Result<()> {
         self.index_load3(None, 0)
     }
 
-    pub fn index_load2(&mut self, fnidx: Option<&str>) -> io::Result<HtsIndex> {
+    pub fn index_load2(&mut self, fnidx: Option<&str>) -> io::Result<()> {
         self.index_load3(fnidx, 0)
     }
 
     pub fn name(&self) -> &str { self.hts_file.name() }
 
-    pub fn index_load3(&mut self, fnidx: Option<&str>, flags: usize) -> io::Result<HtsIndex> {
-        let flags = flags as c_int;
+    pub fn has_index(&self) -> bool {
+        self.idx.is_some() || matches!(self.header, Some(HtsHdr::Tbx(_)))
+    }
+
+    pub fn index_load3(&mut self, fnidx: Option<&str>, flags: usize) -> io::Result<()> {
+        let flags = (flags as c_int) | HTS_IDX_SILENT_FAIL;
         let fname = self.hts_file.name_ptr();
         let fnidx = fnidx.map(get_cstr);
         let have_fnidx = fnidx.is_some();
@@ -361,13 +379,39 @@ impl Hts {
             None => null(),
         };
 
-        let mk_hts_idx_type = |p: *mut hts_idx_t| {
-            NonNull::new(p).map(|q| HtsIndexType::Hts(q))
+        let mk_hts_idx = |p: *mut hts_idx_t| {
+            NonNull::new(p).map(|q| HtsIndex { inner: q, phantom: PhantomData})
         };
 
-        if let Some(idx) = match self.hts_file.format().format {
-            htsExactFormat::Sam | htsExactFormat::Bam | htsExactFormat::Cram => mk_hts_idx_type(unsafe { sam_index_load3(self.hts_file.as_mut(), fname, fnidx_ptr, flags) }),
-            htsExactFormat::Bcf => mk_hts_idx_type(unsafe { hts_idx_load3(fname, fnidx_ptr, HTS_FMT_CSI, flags)}),
+        let idx = match self.hts_file.format().format {
+            htsExactFormat::Bam | htsExactFormat::Cram => {
+                self.idx = mk_hts_idx(unsafe { sam_index_load3(self.hts_file.as_mut(), fname, fnidx_ptr, flags) });
+                self.idx.is_some()
+            },
+            htsExactFormat::Sam => {
+                self.idx = mk_hts_idx(unsafe { sam_index_load3(self.hts_file.as_mut(), fname, fnidx_ptr, flags) });
+                self.idx.is_some() || {
+                    if let Some(q) = NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) }) {
+                        let tbx = Tbx::new(q);
+                        self.header = Some(HtsHdr::Tbx(tbx));
+                        true
+                    } else { false }
+                }
+            },
+            htsExactFormat::Bcf => {
+                self.idx = mk_hts_idx(unsafe { hts_idx_load3(fname, fnidx_ptr, HTS_FMT_CSI, flags)});
+                self.idx.is_some()
+            },
+            htsExactFormat::Vcf => {
+                self.idx = mk_hts_idx(unsafe { hts_idx_load3(fname, fnidx_ptr, HTS_FMT_CSI, flags)});
+                self.idx.is_some() || {
+                    if let Some(q) = NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) }) {
+                        let tbx = Tbx::new(q);
+                        self.header = Some(HtsHdr::Tbx(tbx));
+                        true
+                    } else { false }
+                }
+            },
             _ => {
                 // Retry to load index for Tabix file if we have been supplied with an index name
                 if have_fnidx {
@@ -376,19 +420,57 @@ impl Hts {
                         self.header = Some(HtsHdr::Tbx(tbx));
                     }
                 }
-                // Return tabix index from self.header if present
-                if let Some(HtsHdr::Tbx(t)) = self.header() {
-                    Some(HtsIndexType::Tbx(t))
-                } else {
-                    None
-                }
+                self.header.is_some()
             }
-        } {
-            Ok(HtsIndex{idx, phantom: PhantomData})
+        };
+        if idx { Ok(()) } else { Err(hts_err(format!("Failed to load index for file {}", self.name()))) }
+    }
+
+    pub fn index(&self) -> Option<&hts_idx_t> {
+        if self.has_index() {
+            self.idx.as_ref().map_or_else(
+                || if let Some(HtsHdr::Tbx(tbx)) = self.header.as_ref() {
+                    Some(tbx.idx())
+                } else { None },
+                |p| Some(p.as_ref()))
+        } else { None }
+    }
+
+    pub fn rec_type(&self) -> Option<HtsRecType> {
+        self.header().map(|h| match h {
+            HtsHdr::Sam(_) => HtsRecType::Sam,
+            HtsHdr::Vcf(_) => HtsRecType::Vcf,
+            HtsHdr::Tbx(_) => HtsRecType::Tbx,
+        })
+    }
+
+    pub fn itr_queryi(&mut self, tid: usize, begin: HtsPos, end: HtsPos) -> io::Result<HtsItr> {
+
+        // Load index if not already present
+        if !self.has_index() { self.index_load()? }
+
+        // Extract index
+        let idx = self.index().unwrap();
+
+        // And header
+        let hdr = self.header.as_ref().unwrap();
+
+        if let Some(itr) = NonNull::new(match hdr {
+            HtsHdr::Sam(_) => unsafe { sam_itr_queryi(idx, tid as c_int, begin, end) },
+            HtsHdr::Tbx(_) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, tbx_read_itr) },
+            HtsHdr::Vcf(_) if matches!(self.hts_file.format().format, htsExactFormat::Bcf) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, bcf_read_itr) },
+            HtsHdr::Vcf(_) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, vcf_read_itr) },
+        }) {
+            Ok(HtsItr{inner: itr, phantom: PhantomData })
         } else {
-            Err(hts_err(format!("Failed to load index for file {}", self.name())))
+            Err(hts_err(format!("Error making iterator for file {}", self.name())))
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum HtsRecType {
+    Sam, Vcf, Tbx
 }
 
 pub struct HtsFile {
@@ -462,6 +544,7 @@ impl HtsFile {
     }
 }
 
+#[derive(Debug)]
 pub enum HtsHdr {
     Vcf(VcfHeader),
     Sam(SamHeader),
@@ -469,7 +552,7 @@ pub enum HtsHdr {
 }
 
 pub trait HtsRead {
-    fn read(&mut self, fp: &mut HtsFile, hdr: Option<&mut HtsHdr>) -> io::Result<bool>;
+    fn read(&mut self, hts: &mut Hts) -> io::Result<bool>;
 }
 
 #[repr(C)]
@@ -498,48 +581,43 @@ impl HtsThreadPool {
     }
 }
 
-pub enum HtsIndexType<'a> {
-    Hts(NonNull<hts_idx_t>),
-    Tbx(&'a Tbx),
-}
-
-impl <'a>HtsIndexType<'a> {
-    pub fn idx(&self) -> &hts_idx_t {
-        match self {
-            Self::Hts(p) => unsafe { p.as_ref() },
-            Self::Tbx(p) => p.as_ref().idx(),
-        }
-    }
-}
-
-pub struct HtsIndex<'a> {
-    idx: HtsIndexType<'a>,
+pub struct HtsIndex {
+    inner: NonNull<hts_idx_t>,
     phantom: PhantomData<hts_idx_t>,
 }
 
-unsafe impl<'a> Send for HtsIndex<'a> {}
+unsafe impl Send for HtsIndex {}
 
-impl<'a> HtsIndex<'a> {
-    pub fn sam_itr_queryi(&self, tid: isize, start: usize, end: usize) -> io::Result<HtsItr> {
-        let it = NonNull::new(unsafe {
-            sam_itr_queryi(
-                self.idx.idx(),
-                tid as libc::c_int,
-                start as HtsPos,
-                end as HtsPos,
-            )
-        });
-        if let Some(itr) = it {
-            Ok(HtsItr {
-                inner: itr,
-                itr_type: HtsItrType::SamItr,
-                phantom: PhantomData,
-            })
-        } else {
-            Err(hts_err("Failed to obtain sam iterator".to_string()))
-        }
+impl Deref for HtsIndex {
+    type Target = hts_idx_t;
+    #[inline]
+    fn deref(&self) -> &hts_idx_t { unsafe{self.inner.as_ref()} }
+}
+
+impl DerefMut for HtsIndex {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut hts_idx_t {unsafe{ self.inner.as_mut() }}
+}
+
+impl AsRef<hts_idx_t> for HtsIndex {
+    #[inline]
+    fn as_ref(&self) -> &hts_idx_t { self}
+}
+
+impl AsMut<hts_idx_t> for HtsIndex {
+    #[inline]
+    fn as_mut(&mut self) -> &mut hts_idx_t { self}
+}
+
+impl Drop for HtsIndex {
+    fn drop(&mut self) {
+        unsafe{ hts_idx_destroy(self.as_mut()) }
     }
-    pub fn sam_itr_regarray(&self, hdr: &mut SamHeader, regions: &[String]) -> io::Result<HtsItr> {
+}
+
+/* impl HtsIndex {
+
+   pub fn sam_itr_regarray(&self, hdr: &mut SamHeader, regions: &[String]) -> io::Result<HtsItr> {
         let count = regions.len();
         if count == 0 {
             return self.sam_itr_queryi(HTS_IDX_START as isize, 0, 0);
@@ -567,6 +645,7 @@ impl<'a> HtsIndex<'a> {
         }
     }
 }
+*/
 
 pub struct HtsFormat {
     inner: NonNull<htsFormat>,
@@ -626,107 +705,34 @@ impl HtsFormat {
     }
 }
 
-pub enum HtsItrRec {
-    BamRec(bam1_t),
-    KStr(kstring_t),
-    BcfRec(bcf1_t),
-}
-
-pub enum HtsItrType<'a> {
-    SamItr,
-    TbxItr(&'a mut tbx_t),
-    VcfItr,
-    None,
-}
-
-impl <'a> HtsItrType<'a> {
-    pub fn take(&mut self) -> HtsItrType<'a> {
-        std::mem::replace(self, Self::None)
-    }
-}
-
-pub struct HtsItr<'a> {
+pub struct HtsItr{
     inner: NonNull<hts_itr_t>,
-    itr_type: HtsItrType<'a>,
     phantom: PhantomData<hts_itr_t>,
 }
 
-impl <'a>Deref for HtsItr<'a> {
+impl Deref for HtsItr {
     type Target = hts_itr_t;
     #[inline]
     fn deref(&self) -> &hts_itr_t { unsafe{self.inner.as_ref()} }
 }
 
-impl <'a>DerefMut for HtsItr<'a> {
+impl DerefMut for HtsItr {
     #[inline]
     fn deref_mut(&mut self) -> &mut hts_itr_t {unsafe{ self.inner.as_mut() }}
 }
 
-impl <'a>AsRef<hts_itr_t> for HtsItr<'a> {
+impl AsRef<hts_itr_t> for HtsItr {
     #[inline]
     fn as_ref(&self) -> &hts_itr_t { self}
 }
 
-impl <'a>AsMut<hts_itr_t> for HtsItr<'a> {
+impl AsMut<hts_itr_t> for HtsItr {
     #[inline]
     fn as_mut(&mut self) -> &mut hts_itr_t { self}
 }
 
-unsafe impl <'a> Send for HtsItr<'a> {}
-
-impl <'a>Drop for HtsItr<'a> {
+impl Drop for HtsItr {
     fn drop(&mut self) {
-        unsafe { hts_itr_destroy(self.inner.as_ptr()) };
-    }
-}
-
-impl <'a> HtsItr<'a> {
-    pub fn new(itr: *mut hts_itr_t, itr_type: HtsItrType<'a>) -> Option<Self> {
-        if matches!(itr_type, HtsItrType::None) {
-            None
-        } else {
-            NonNull::new(itr).map(|p| HtsItr { inner: p, itr_type, phantom: PhantomData })
-        }
-    }
-
-    pub fn next(&mut self, fp: &mut HtsFile, rec: &mut HtsItrRec) -> io::Result<bool> {
-
-       let i = if matches!(self.itr_type, HtsItrType::SamItr) && self.as_ref().multi() != 0 {
-            if let HtsItrRec::BamRec(b) = rec {
-                unsafe { hts_itr_multi_next(fp.as_mut(), self.as_mut(), b as *mut bam1_t as *mut c_void) }
-            } else {
-                return Err(hts_err("Wrong record type for HtsItr::next()".to_string()))
-            }
-        } else {
-            let bgfp = if fp.as_ref().is_bgzf() != 0 {
-                fp.as_ref().fp as *mut BGZF
-            } else {
-                null_mut::<BGZF>()
-            };
-            match (&mut self.itr_type, rec) {
-                (HtsItrType::SamItr, HtsItrRec::BamRec(b)) => {
-                    unsafe {hts_itr_next(bgfp, self.as_mut(), b as *mut bam1_t as *mut c_void, fp.as_mut() as *mut htsFile as *mut c_void)}
-                },
-                (HtsItrType::VcfItr, HtsItrRec::BcfRec(b)) if !bgfp.is_null() => {
-                    unsafe {hts_itr_next(bgfp, self.as_mut(), b as *mut bcf1_t as *mut c_void, null_mut())}
-                },
-                (HtsItrType::TbxItr(_), HtsItrRec::KStr(s)) if !bgfp.is_null() => {
-                    let mut t = self.itr_type.take();
-                    let tbx = if let HtsItrType::TbxItr(tx) = &mut t { tx } else { panic!("Wrong HtsItrType") };
-                    let j = unsafe {hts_itr_next(bgfp, self.as_mut(), s as *mut kstring_t as *mut c_void, *tbx as *mut tbx_t as *mut c_void)};
-                    self.itr_type = t;
-                    j
-                },
-                (HtsItrType::VcfItr, _) | (HtsItrType::TbxItr(_), _) if bgfp.is_null() => return Err(hts_err("Only bgzf compressed files can be used with iterators".to_string())),
-                _ => return Err(hts_err("Wrong record type for HtsItr::next()".to_string())),
-            }
-        };
-        if i >= 0 {
-            Ok(true)
-        } else if i == -1 {
-            Ok(false)
-        } else {
-            Err(hts_err("Error reading record".to_string()))
-        }
+        unsafe { hts_itr_destroy(self.as_mut()) };
     }
 }

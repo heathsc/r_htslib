@@ -1,14 +1,16 @@
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::ptr::NonNull;
+use std::ptr::{NonNull, null_mut};
 use std::str::FromStr;
 use std::ffi::CStr;
 
 use std::{fmt, io, ptr};
 
-use super::{from_cstr, get_cstr, htsFile, hts_err, kstring_t, HtsFile, HtsPos, HtsHdr, HtsRead};
-use libc::{c_char, c_int, size_t};
+use super::{
+   from_cstr, get_cstr, htsFile, hts_err, kstring_t, Hts, HtsFile, HtsPos,
+   HtsHdr, HtsItr, HtsRead, BGZF, hts_itr_next, hts_itr_multi_next};
+use libc::{c_char, c_int, c_void, size_t};
 
 pub const BAM_FPAIRED: u16 = 1;
 pub const BAM_FPROPER_PAIR: u16 = 2;
@@ -824,8 +826,10 @@ impl AsMut<bam1_t> for BamRec {
 unsafe impl Send for BamRec {}
 
 impl HtsRead for BamRec {
-   fn read(&mut self, fp: &mut HtsFile, hdr: Option<&mut HtsHdr>) -> io::Result<bool> {
-      let hts_file = unsafe { fp.inner.as_mut() };
+   fn read(&mut self, hts: &mut Hts) -> io::Result<bool> {
+
+      let (fp, hdr) = hts.hts_file_and_header();
+      let hts_file = fp.as_mut();
       let res = if let Some(HtsHdr::Sam(hd)) = hdr {
          match unsafe { sam_read1(hts_file, hd.as_mut(), self.as_mut()) } {
             0..=c_int::MAX => Ok(true),
@@ -925,6 +929,27 @@ impl BamRec {
          }
       } else {
          Err(hts_err("Wrong header type for SAM/BAM/CRAM format".to_string()))
+      }
+   }
+
+   pub fn read_itr(&mut self, hts: &mut Hts, itr: &mut HtsItr) -> io::Result<bool> {
+      let (fp, hdr) = hts.hts_file_and_header();
+      let i = if itr.multi() != 0 {
+         unsafe { hts_itr_multi_next(fp.as_mut(), itr.as_mut(), self.as_mut() as *mut bam1_t as *mut c_void) }
+      } else {
+         let bgfp = if fp.as_ref().is_bgzf() != 0 {
+            fp.as_ref().fp as *mut BGZF
+         } else {
+            null_mut::<BGZF>()
+         };
+         unsafe {hts_itr_next(bgfp, itr.as_mut(), self.as_mut() as *mut bam1_t as *mut c_void, fp.as_mut() as *mut htsFile as *mut c_void)}
+      };
+      if i >= 0 {
+         Ok(true)
+      } else if i == -1 {
+         Ok(false)
+      } else {
+         Err(hts_err("Error reading record".to_string()))
       }
    }
 }

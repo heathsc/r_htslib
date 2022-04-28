@@ -149,4 +149,16 @@ impl kstring_t {
     pub fn to_cstr(&self) -> Option<&CStr> {
         self.s.map(|s| unsafe { CStr::from_ptr(s.as_ptr())})
     }
+    pub fn as_slice(&self, inc_zero: bool) -> Option<&[u8]> {
+        self.s.map(|s| {
+            let p = s.as_ptr() as *const u8;
+            unsafe {std::slice::from_raw_parts(p, if inc_zero { self.l +  1 } else { self.l })}
+        })
+    }
+    pub fn as_slice_mut(&mut self, inc_zero: bool) -> Option<&mut [u8]> {
+        self.s.map(|s| {
+            let p = s.as_ptr() as *mut u8;
+            unsafe {std::slice::from_raw_parts_mut(p, if inc_zero { self.l +  1 } else { self.l })}
+        })
+    }
 }
