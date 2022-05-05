@@ -1,319 +1,26 @@
-use super::{bam1_t, bcf1_t, tbx_t, get_cstr, from_cstr, hts_err, kstring_t, sam_hdr_t};
+pub mod lib;
+pub use lib::*;
 
-use c2rust_bitfields::BitfieldStruct;
-use libc::{c_char, c_int, c_short, c_uchar, c_uint};
-use std::ffi::{c_void, CString};
-use std::io;
-use std::marker::PhantomData;
-use std::ptr::{null_mut, null, NonNull};
-use std::ops::{Deref, DerefMut};
+use libc::{c_void, c_int};
 
-use crate::{
-    tbx_index_load3, VcfHeader, SamHeader, Tbx, tbx_readrec,
-    vcf_read_itr, bcf_read_itr, tbx_read_itr
+use std::{
+    io,
+    marker::PhantomData,
+    ptr::{null, NonNull},
+    ops::{Deref, DerefMut},
+    ffi::CStr,
 };
 
-pub type HtsPos = i64;
-
-pub const HTS_IDX_NOCOOR: HtsPos = -2;
-pub const HTS_IDX_START: HtsPos = -3;
-pub const HTS_IDX_REST: HtsPos = -4;
-pub const HTS_IDX_NONE: HtsPos = -5;
-
-pub const HTS_IDX_SILENT_FAIL: c_int = 2;
-
-pub const HTS_FMT_CSI: c_int = 0;
-pub const HTS_FMT_BAI: c_int = 1;
-pub const HTS_FMT_TBI: c_int = 2;
-pub const HTS_FMT_CRAI: c_int = 3;
-pub const HTS_FMT_FAI: c_int = 4;
-
-pub const FT_UNKN: u32 = 0;
-pub const FT_GZ: u32 = 1;
-pub const FT_VCF: u32 = 2;
-pub const FT_VCF_GZ: u32 = FT_GZ | FT_VCF;
-pub const FT_BCF: u32 = 4;
-pub const FT_BCF_GZ: u32 = FT_GZ | FT_BCF;
-pub const FT_STDIN: u32 = 8;
-
-#[repr(C)]
-pub struct hts_opt {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub struct hts_filter_t {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-struct hts_tpool {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub struct prehtsFile {
-    bfield: [u8; 4],
-    lineno: i64,
-    line: kstring_t,
-    fn_: *mut c_char,
-}
-
-#[repr(C)]
-#[derive(BitfieldStruct)]
-pub struct htsFile {
-    #[bitfield(name = "is_bin", ty = "c_uchar", bits = "0..=0")]
-    #[bitfield(name = "is_write", ty = "c_uchar", bits = "1..=1")]
-    #[bitfield(name = "is_be", ty = "c_uchar", bits = "2..=2")]
-    #[bitfield(name = "is_cram", ty = "c_uchar", bits = "3..=3")]
-    #[bitfield(name = "is_bgzf", ty = "c_uchar", bits = "4..=4")]
-    #[bitfield(name = "dummy", ty = "u32", bits = "5..=31")]
-    bfield: [u8; 4],
-    lineno: i64,
-    line: kstring_t,
-    fn_: NonNull<c_char>,
-    fn_aux: *mut c_char,
-    pub (crate) fp: *mut c_void,
-    state: *mut c_void,
-    format: htsFormat,
-    idx: *mut hts_idx_t,
-    fnidx: *const c_char,
-    bam_header: *mut sam_hdr_t,
-    filter: *mut hts_filter_t,
-}
-
-pub enum HtsFileDesc {
-    Bgzf(NonNull<BGZF>),
-    Cram(NonNull<cram_fd>),
-    Hfile(NonNull<hfile>),
-}
-
-impl htsFile {
-    pub fn format(&self) -> &htsFormat { &self.format }
-
-    pub fn name(&self) -> &str {
-        from_cstr(self.name_ptr())
-    }
-
-    pub fn file_desc(&mut self) -> Option<HtsFileDesc> {
-        if self.is_bgzf() != 0 {
-            NonNull::new(self.fp as *mut BGZF).map(|p| HtsFileDesc::Bgzf(p))
-        } else if self.is_cram() != 0 {
-            NonNull::new(self.fp as *mut cram_fd).map(|p| HtsFileDesc::Cram(p))
-        } else {
-            NonNull::new(self.fp as *mut hfile).map(|p| HtsFileDesc::Hfile(p))
-        }
-    }
-
-    fn name_ptr(&self) -> *const c_char {
-        self.fn_.as_ptr()
-    }
-
-    pub fn set_threads(&mut self, t: usize) -> io::Result<()> {
-        let ret = unsafe { hts_set_threads(self, t as c_int) };
-        if ret != 0 {
-            Err(hts_err(format!("Failed to set threads for file {}", self.name())))
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn set_fai_filename<S: AsRef<str>>(&mut self, name: S) -> io::Result<()> {
-        let name = name.as_ref();
-        let ret = unsafe { hts_set_fai_filename(self, get_cstr(name).as_ptr()) };
-        if ret != 0 {
-            Err(hts_err(format!("Failed to attach reference index {} to file {}", name, self.name())))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[repr(C)]
-pub struct hts_idx_t {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub struct hts_reglist_t {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub struct hts_pair64_max {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub struct HtsItrBins {
-    n: c_int,
-    m: c_int,
-    a: *mut c_int,
-}
-
-#[repr(C)]
-#[derive(BitfieldStruct)]
-pub struct hts_itr_t {
-    #[bitfield(name = "read_rest", ty = "c_uchar", bits = "0..=0")]
-    #[bitfield(name = "finished", ty = "c_uchar", bits = "1..=1")]
-    #[bitfield(name = "is_cram", ty = "c_uchar", bits = "2..=2")]
-    #[bitfield(name = "nocoor", ty = "c_uchar", bits = "3..=3")]
-    #[bitfield(name = "multi", ty = "c_uchar", bits = "4..=4")]
-    #[bitfield(name = "dummy", ty = "u32", bits = "5..=31")]
-    bfield: [u8; 4],
-    tid: c_int,
-    n_off: c_int,
-    i: c_int,
-    n_reg: c_int,
-    beg: HtsPos,
-    end: HtsPos,
-    reg_list: *mut hts_reglist_t,
-    curr_tid: c_int,
-    curr_reg: c_int,
-    curr_intv: c_int,
-    curr_beg: HtsPos,
-    curr_end: HtsPos,
-    curr_off: u64,
-    nocoor_off: u64,
-    off: *mut hts_pair64_max,
-    readrec: HtsReadrecFunc,
-    seek: HtsSeekFunc,
-    tell: HtsTellFunc,
-    bins: HtsItrBins,
-}
-
-pub type HtsReadrecFunc = unsafe extern fn(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int;
-pub type HtsSeekFunc = unsafe extern fn(fp: *mut c_void, offset: i64, where_: c_int);
-pub type HtsTellFunc = unsafe extern fn(fp: *mut c_void);
-
-#[repr(C)]
-pub struct BGZF {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub struct cram_fd {
-    _unused: [u8; 0],
-}
-#[repr(C)]
-pub struct hfile {
-    _unused: [u8; 0],
-}
-
-#[repr(C)]
-pub enum htsFormatCategory {
-    UnknownCategory,
-    SequenceData,
-    VariantData,
-    IndexFile,
-    RegionList,
-}
-
-impl Default for htsFormatCategory {
-    fn default() -> Self {
-        Self::UnknownCategory
-    }
-}
-
-#[repr(C)]
-#[derive(PartialEq)]
-pub enum htsExactFormat {
-    UnknownFormat, BinaryFormat, TextFormat,
-    Sam, Bam, Bai, Cram, Crai, Vcf, Bcf, Csi, Gzi, Tbi, Bed, HtsGet,
-    EmptyFormat, FastaFormat, FastqFormat, FaiFormat, FqiFormat, HtsCrypt4GH,
-}
-
-impl Default for htsExactFormat {
-    fn default() -> Self { Self::UnknownFormat }
-}
-
-#[repr(C)]
-#[derive(PartialEq)]
-pub enum htsCompression {
-    NoCompression,
-    Gzip,
-    Bgzf,
-    Custom,
-    Bzip2Compression,
-}
-
-impl Default for htsCompression {
-    fn default() -> Self {
-        Self::NoCompression
-    }
-}
-
-#[repr(C)]
-#[derive(Default)]
-pub struct htsFormatVersion {
-    major: c_short,
-    minor: c_short,
-}
-
-#[repr(C)]
-pub struct htsFormat {
-    category: htsFormatCategory,
-    format: htsExactFormat,
-    version: htsFormatVersion,
-    compression: htsCompression,
-    compression_level: c_short,
-    specific: *mut hts_opt,
-    phantom: PhantomData<hts_opt>,
-}
-
-impl Default for htsFormat {
-    fn default() -> Self {
-        Self {
-            category: htsFormatCategory::default(),
-            format: htsExactFormat::default(),
-            version: htsFormatVersion::default(),
-            compression: htsCompression::default(),
-            compression_level: 0,
-            specific: std::ptr::null_mut::<hts_opt>(),
-            phantom: PhantomData,
-        }
-    }
-}
-
-impl Drop for htsFormat {
-    fn drop(&mut self) {
-        if !self.specific.is_null() {
-            unsafe { hts_opt_free(self.specific) }
-        }
-    }
-}
-
-impl htsFormat {
-    pub fn format(&self) -> &htsExactFormat { &self.format }
-}
-
-#[link(name = "hts")]
-extern "C" {
-    fn hts_open_format(fn_: *const c_char, mode: *const c_char, fmt: *const htsFormat) -> *mut prehtsFile;
-    fn hts_close(fp_: *mut htsFile) -> c_int;
-    fn hts_set_threads(fp_: *mut htsFile, t_: c_int) -> c_int;
-    fn hts_set_thread_pool(fp_: *mut htsFile, p: *const HtsThreadPool) -> c_int;
-    fn hts_tpool_init(n: c_int) -> *mut hts_tpool;
-    fn hts_tpool_destroy(p: *mut hts_tpool);
-    fn sam_index_load3(fp_: *mut htsFile, name: *const c_char, fnidx: *const c_char, flags: c_int) -> *mut hts_idx_t;
-    fn hts_idx_load3(name: *const c_char, fnidx: *const c_char, fmt: c_int, flags : c_int) -> *mut hts_idx_t;
-    fn hts_idx_destroy(idx: *mut hts_idx_t);
-    fn hts_set_fai_filename(fp_: *mut htsFile, fn_aux: *const c_char) -> c_int;
-    fn hts_itr_destroy(iter: *mut hts_itr_t);
-    fn hts_itr_query(idx: *const hts_idx_t, tid: c_int, begin: HtsPos, end: HtsPos, readrec: HtsReadrecFunc) -> *mut hts_itr_t;
-    fn sam_itr_queryi(idx: *const hts_idx_t, tid: c_int, start: HtsPos, end: HtsPos) -> *mut hts_itr_t;
-//    fn sam_itr_regarray(idx: *const hts_idx_t, hdr: *mut sam_hdr_t, regarray: *const *const c_char, count: c_uint) -> *mut hts_itr_t;
-    pub (crate) fn hts_itr_multi_next(fp: *mut htsFile, itr: *mut hts_itr_t, r: *mut c_void) -> c_int;
-    pub(crate) fn hts_itr_next(fp: *mut BGZF, itr: *mut hts_itr_t, r: *mut c_void, data: *mut c_void) -> c_int;
-    fn hts_parse_format(format: *mut htsFormat, str: *const c_char) -> c_int;
-    fn hts_opt_free(opts: *mut hts_opt);
-    fn hts_opt_add(opts: *mut *mut hts_opt, c_arg: *const c_char) -> c_int;
-    pub(crate) fn bgzf_getline(fp: *mut BGZF, delim: c_int, str: *mut kstring_t) -> c_int;
-}
+use crate::{
+    tbx_index_load3, VcfHeader, SamHeader, Tbx, vcf_read_itr, bcf_read_itr, tbx_read_itr, tbx_name2id,
+    sam_itr_queryi, sam_hdr_t, bam_name2id, BamRec, BcfRec, TbxRec, bcf_hdr_name2id,
+    get_cstr, hts_err, bcf_hdr_t, tbx_t
+};
 
 pub struct Hts {
     pub(crate) hts_file: HtsFile,
     pub(crate) header: Option<HtsHdr>,
+    pub(crate) tbx: Option<Tbx>,
     pub(crate) idx: Option<HtsIndex>,
 }
 
@@ -331,16 +38,18 @@ impl Hts {
     fn open_format_<S: AsRef<str>>(name: S, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self> {
         let name = name.as_ref();
         let mut fp = HtsFile::open_format_(name, mode, fmt)?;
-        let header = if fp.as_ref().is_write() == 0 {
+        let (header, tbx) = if fp.as_ref().is_write() == 0 {
             match fp.format().format {
-                htsExactFormat::Sam | htsExactFormat::Bam | htsExactFormat::Cram => Some(HtsHdr::Sam(SamHeader::read(&mut fp)?)),
-                htsExactFormat::Bcf | htsExactFormat::Vcf => Some(HtsHdr::Vcf(VcfHeader::read(&mut fp)?)),
-                _ => if let Ok(tbx) = Tbx::load(name) { Some(HtsHdr::Tbx(tbx)) } else { None }
+                htsExactFormat::Sam | htsExactFormat::Bam | htsExactFormat::Cram => (Some(HtsHdr::Sam(SamHeader::read(&mut fp)?)), None),
+                htsExactFormat::Bcf | htsExactFormat::Vcf => (Some(HtsHdr::Vcf(VcfHeader::read(&mut fp)?)), None),
+                _ => if let Ok(tbx) = Tbx::load(name) { (None, Some(tbx)) } else { (None, None) }
             }
-        } else { None };
+        } else { (None, None) };
+
         Ok(Self {
             hts_file: fp,
             header,
+            tbx,
             idx: None,
         })
     }
@@ -349,10 +58,18 @@ impl Hts {
 
     pub fn header_mut(&mut self) -> Option<&mut HtsHdr> { self.header.as_mut() }
 
+    pub fn tbx(&self) -> Option<&Tbx> { self.tbx.as_ref() }
+
+    pub fn tbx_mut(&mut self) -> Option<&mut Tbx> { self.tbx.as_mut() }
+
     pub fn hts_file(&mut self) -> &mut HtsFile { &mut self.hts_file }
 
     pub fn hts_file_and_header(&mut self) -> (&mut HtsFile, Option<&mut HtsHdr>) {
         (&mut self.hts_file, self.header.as_mut())
+    }
+
+    pub fn hts_file_and_tbx(&mut self) -> (&mut HtsFile, Option<&mut Tbx>) {
+        (&mut self.hts_file, self.tbx.as_mut())
     }
 
     pub fn index_load(&mut self) -> io::Result<()> {
@@ -366,7 +83,7 @@ impl Hts {
     pub fn name(&self) -> &str { self.hts_file.name() }
 
     pub fn has_index(&self) -> bool {
-        self.idx.is_some() || matches!(self.header, Some(HtsHdr::Tbx(_)))
+        self.idx.is_some() || self.tbx.is_some()
     }
 
     pub fn index_load3(&mut self, fnidx: Option<&str>, flags: usize) -> io::Result<()> {
@@ -392,8 +109,7 @@ impl Hts {
                 self.idx = mk_hts_idx(unsafe { sam_index_load3(self.hts_file.as_mut(), fname, fnidx_ptr, flags) });
                 self.idx.is_some() || {
                     if let Some(q) = NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) }) {
-                        let tbx = Tbx::new(q);
-                        self.header = Some(HtsHdr::Tbx(tbx));
+                        self.tbx = Some(Tbx::new(q));
                         true
                     } else { false }
                 }
@@ -406,8 +122,7 @@ impl Hts {
                 self.idx = mk_hts_idx(unsafe { hts_idx_load3(fname, fnidx_ptr, HTS_FMT_CSI, flags)});
                 self.idx.is_some() || {
                     if let Some(q) = NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) }) {
-                        let tbx = Tbx::new(q);
-                        self.header = Some(HtsHdr::Tbx(tbx));
+                        self.tbx = Some(Tbx::new(q));
                         true
                     } else { false }
                 }
@@ -416,11 +131,10 @@ impl Hts {
                 // Retry to load index for Tabix file if we have been supplied with an index name
                 if have_fnidx {
                     if let Some(q) = NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) }) {
-                        let tbx = Tbx::new(q);
-                        self.header = Some(HtsHdr::Tbx(tbx));
+                        self.tbx = Some(Tbx::new(q));
                     }
                 }
-                self.header.is_some()
+                self.tbx.is_some()
             }
         };
         if idx { Ok(()) } else { Err(hts_err(format!("Failed to load index for file {}", self.name()))) }
@@ -429,41 +143,85 @@ impl Hts {
     pub fn index(&self) -> Option<&hts_idx_t> {
         if self.has_index() {
             self.idx.as_ref().map_or_else(
-                || if let Some(HtsHdr::Tbx(tbx)) = self.header.as_ref() {
-                    Some(tbx.idx())
-                } else { None },
+                || self.tbx.as_ref().map(|tbx| tbx.idx()),
                 |p| Some(p.as_ref()))
         } else { None }
     }
 
     pub fn rec_type(&self) -> Option<HtsRecType> {
-        self.header().map(|h| match h {
-            HtsHdr::Sam(_) => HtsRecType::Sam,
-            HtsHdr::Vcf(_) => HtsRecType::Vcf,
-            HtsHdr::Tbx(_) => HtsRecType::Tbx,
-        })
+        if self.tbx.is_some() { Some(HtsRecType::Tbx) } else {
+            self.header().map(|h| match h {
+                HtsHdr::Sam(_) => HtsRecType::Sam,
+                HtsHdr::Vcf(_) => HtsRecType::Vcf,
+            })
+        }
     }
 
     pub fn itr_queryi(&mut self, tid: usize, begin: HtsPos, end: HtsPos) -> io::Result<HtsItr> {
-
-        // Load index if not already present
         if !self.has_index() { self.index_load()? }
+        let idx= self.index().unwrap();
+        let hdr = self.header.as_ref();
 
-        // Extract index
-        let idx = self.index().unwrap();
-
-        // And header
-        let hdr = self.header.as_ref().unwrap();
-
-        if let Some(itr) = NonNull::new(match hdr {
-            HtsHdr::Sam(_) => unsafe { sam_itr_queryi(idx, tid as c_int, begin, end) },
-            HtsHdr::Tbx(_) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, tbx_read_itr) },
-            HtsHdr::Vcf(_) if matches!(self.hts_file.format().format, htsExactFormat::Bcf) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, bcf_read_itr) },
-            HtsHdr::Vcf(_) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, vcf_read_itr) },
+        if let Some(itr) = NonNull::new(match (hdr, self.tbx.as_ref()) {
+            (_, Some(_)) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, tbx_read_itr) },
+            (Some(HtsHdr::Sam(_)), _) => unsafe { sam_itr_queryi(idx, tid as c_int, begin, end) },
+            (Some(HtsHdr::Vcf(_)), _) if matches!(self.hts_file.format().format, htsExactFormat::Bcf) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, bcf_read_itr) },
+            (Some(HtsHdr::Vcf(_)), _) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, vcf_read_itr) },
+            (None, None) => return Err(hts_err(format!("Error making iterator for file {}", self.name()))),
         }) {
-            Ok(HtsItr{inner: itr, phantom: PhantomData })
+            Ok(HtsItr { inner: itr, phantom: PhantomData })
         } else {
             Err(hts_err(format!("Error making iterator for file {}", self.name())))
+        }
+    }
+
+    pub fn itr_querys(&mut self, reg: &CStr) -> io::Result<HtsItr> {
+        match reg.to_bytes() {
+            [b'.'] => self.itr_queryi(HTS_IDX_START as usize, 0, 0),
+            [b'*'] => self.itr_queryi(HTS_IDX_NOCOOR as usize, 0, 0),
+            _ => {
+                let (tid, begin, end) = self.parse_region(reg)?;
+                self.itr_queryi(tid as usize, begin, end)
+            },
+        }
+    }
+
+    fn parse_region(&mut self, reg: &CStr) -> io::Result<(c_int, HtsPos, HtsPos)> {
+        let mut beg: HtsPos = 0;
+        let mut end: HtsPos = 0;
+        let mut tid: c_int = 0;
+
+        let (get_id, hdr):(HtsName2Id, *mut c_void) = if let Some(tbx) = self.tbx.as_mut() {
+            // Tabix file
+            (tbx_name2id, tbx.as_mut() as *mut tbx_t as *mut c_void)
+        } else {
+            // VCF/BCF or SAM/BAM/CRAM files
+            match self.header_mut() {
+                Some(HtsHdr::Vcf(h)) => (bcf_hdr_name2id, h.as_mut() as *mut bcf_hdr_t as *mut c_void),
+                Some(HtsHdr::Sam(h)) => (bam_name2id, h.as_mut() as *mut sam_hdr_t as *mut c_void),
+                _ => return Err(hts_err(format!("Error making iterator for file {}", self.name()))),
+            }
+        };
+
+        if unsafe {
+            hts_parse_region(reg.as_ptr(), &mut tid, &mut beg, &mut end, get_id, hdr, HTS_PARSE_THOUSANDS_SEP)
+        }.is_null() { return Err(hts_err(format!("Error parsing region {:?}", reg))) }
+
+        Ok((tid, beg, end))
+    }
+
+    pub fn reader<T>(&mut self) -> HtsReader<T> {
+        HtsReader {
+            hts: self,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn itr_reader<T>(&mut self, itr: HtsItr) -> HtsItrReader<T> {
+        HtsItrReader {
+            hts: self,
+            itr,
+            _phantom: PhantomData,
         }
     }
 }
@@ -471,6 +229,12 @@ impl Hts {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum HtsRecType {
     Sam, Vcf, Tbx
+}
+
+pub enum HtsRec {
+    Sam(BamRec),
+    Vcf(BcfRec),
+    Tbx(TbxRec),
 }
 
 pub struct HtsFile {
@@ -548,11 +312,6 @@ impl HtsFile {
 pub enum HtsHdr {
     Vcf(VcfHeader),
     Sam(SamHeader),
-    Tbx(Tbx),
-}
-
-pub trait HtsRead {
-    fn read(&mut self, hts: &mut Hts) -> io::Result<bool>;
 }
 
 #[repr(C)]
@@ -614,38 +373,6 @@ impl Drop for HtsIndex {
         unsafe{ hts_idx_destroy(self.as_mut()) }
     }
 }
-
-/* impl HtsIndex {
-
-   pub fn sam_itr_regarray(&self, hdr: &mut SamHeader, regions: &[String]) -> io::Result<HtsItr> {
-        let count = regions.len();
-        if count == 0 {
-            return self.sam_itr_queryi(HTS_IDX_START as isize, 0, 0);
-        }
-        // We need to do this in 2 stages: generate and array of CStrings and then an array of ptrs to the CStrings
-        // otherwise the CStrings go out of scope before they are used and the ptrs point to garbage
-        let carray: Vec<CString> = regions.iter().map(get_cstr).collect();
-        let parray: Vec<*const c_char> = carray.iter().map(|cs| cs.as_ptr()).collect();
-        let it = NonNull::new(unsafe {
-            sam_itr_regarray(
-                self.idx.idx(),
-                hdr.as_mut(),
-                parray.as_ptr(),
-                count as c_uint,
-            )
-        });
-        if let Some(itr) = it {
-            Ok(HtsItr {
-                inner: itr,
-                itr_type: HtsItrType::SamItr,
-                phantom: PhantomData,
-            })
-        } else {
-            Err(hts_err("Failed to obtain sam iterator".to_string()))
-        }
-    }
-}
-*/
 
 pub struct HtsFormat {
     inner: NonNull<htsFormat>,
@@ -736,3 +463,40 @@ impl Drop for HtsItr {
         unsafe { hts_itr_destroy(self.as_mut()) };
     }
 }
+
+pub trait HtsRead {
+    fn read(&mut self, hts: &mut Hts) -> io::Result<bool>;
+    fn read_itr(&mut self, hts: &mut Hts, itr: &mut HtsItr) -> io::Result<bool>;
+}
+
+pub struct HtsReader<'a, T> {
+    hts: &'a mut Hts,
+    _phantom: PhantomData<T>,
+}
+
+impl <'a, T: HtsRead> HtsReader<'a, T> {
+    pub fn read(&mut self, rec: &mut T) -> io::Result<bool> {
+        rec.read(self.hts)
+    }
+
+    pub fn header(&self) -> Option<&HtsHdr> {
+        self.hts.header()
+    }
+}
+
+pub struct HtsItrReader<'a, T> {
+    hts: &'a mut Hts,
+    itr: HtsItr,
+    _phantom: PhantomData<T>,
+}
+
+impl <'a, T: HtsRead> HtsItrReader<'a, T> {
+    pub fn read(&mut self, rec: &mut T) -> io::Result<bool> {
+        rec.read_itr(self.hts, &mut self.itr)
+    }
+
+    pub fn header(&self) -> Option<&HtsHdr> {
+        self.hts.header()
+    }
+}
+

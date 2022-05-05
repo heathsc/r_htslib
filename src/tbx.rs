@@ -11,7 +11,7 @@ use regex::bytes::Regex;
 
 use libc::{c_char, c_int};
 use crate::bgzf_getline;
-use super::{hts_err, hts_idx_t, hts_itr_t, HtsItr, Hts, HtsPos, HtsHdr, HtsFile, HtsFileDesc, HtsRead, BGZF, kstring_t, hts_itr_next};
+use super::{hts_err, hts_idx_t, HtsItr, Hts, HtsPos, HtsFileDesc, HtsRead, BGZF, kstring_t, hts_itr_next};
 
 pub const TBX_GENERIC: i32 = 0;
 pub const TBX_SAM: i32 = 1;
@@ -52,18 +52,20 @@ unsafe impl Send for TbxRec {}
 impl TbxRec {
    pub fn new() -> Self { Self::default() }
 
-   pub fn parse(&mut self, tbx: &tbx_t) -> io::Result<()> {
+   pub fn parse(&mut self, tbx: &mut tbx_t) -> io::Result<()> {
       lazy_static! {
          static ref RE: Regex = Regex::new(r"^|;END=(\d+)").unwrap();
       }
 
       if let Some(p) = self.line.as_slice_mut(true) {
-         let cf = &tbx.conf;
+         let sc = tbx.conf.sc;
+         let bc = tbx.conf.bc;
+         let ec = tbx.conf.ec;
+         let preset = tbx.conf.preset;
          let mut id = 0;
-         let mut x = 0;
          let mut vals: (Option<c_int>, Option<HtsPos>, Option<HtsPos>) = (None, None, None);
 
-         let get_ptr = |p: &[u8]| unsafe { p.as_ptr() as *const u8 as *const c_char };
+         let get_ptr = |p: &[u8]| p.as_ptr() as *const u8 as *const c_char;
 
          let get_num = |p: &[u8]| -> io::Result<HtsPos> { unsafe {
             let p_start = get_ptr(p);
@@ -84,22 +86,22 @@ impl TbxRec {
             id += 1;
             let len =  p_curr.len();
             if len > 0 {
-               if id == cf.sc {
+               if id == sc {
                   // Sequence (contig)
                   let mut tmp: u8 = 0;
                   vals.0 = unsafe {
                      std::ptr::swap(&mut p_curr[len - 1], &mut tmp);
-                     match tbx_name2id(tbx, get_ptr(p_curr)) {
+                     match tbx_name2id(tbx as *mut tbx_t as *mut c_void, get_ptr(p_curr)) {
                         tid if tid >= 0 => Some(tid),
                         _ => return Err(hts_err("Out of memory".to_string())),
                      }
                   };
                   p_curr[len - 1] = tmp;
 
-               } else if id == cf.bc {
+               } else if id == bc {
                   // Start column
                   let k = get_num(p_curr)?;
-                  let (begin, end) = if (cf.preset & TBX_UCSC) != 0 {
+                  let (begin, end) = if (preset & TBX_UCSC) != 0 {
                      ((k - 1).max(0), k.max(1))
                   } else {
                      (k.max(0), (k + 1).max(1))
@@ -108,8 +110,8 @@ impl TbxRec {
                   vals.2 = Some(end);
 
                } else {
-                  match cf.preset & 0xffff {
-                     TBX_GENERIC if id == cf.ec => vals.2 = Some(get_num(p_curr)?),
+                  match preset & 0xffff {
+                     TBX_GENERIC if id == ec => vals.2 = Some(get_num(p_curr)?),
                      TBX_SAM if id == 6 => { // CIGAR
                         let mut len = 0;
                         let mut op_len = 0;
@@ -162,16 +164,20 @@ impl TbxRec {
    pub fn begin(&self) -> HtsPos { self.begin }
 
    pub fn end(&self) -> HtsPos { self.end }
+}
 
-   pub fn read_itr(&mut self, hts: &mut Hts, itr: &mut HtsItr) -> io::Result<bool> {
-      let (fp, hdr) = hts.hts_file_and_header();
+impl HtsRead for TbxRec {
+   fn read(&mut self, hts: &mut Hts) -> io::Result<bool> {
+      let (fp, tbx) = hts.hts_file_and_tbx();
       if let Some(HtsFileDesc::Bgzf(bgzf)) = fp.file_desc() {
-         let res = if let Some(HtsHdr::Tbx(tbx)) = hdr {
-            match unsafe { hts_itr_next(
+         let res = if let Some(tbx) = tbx {
+            match unsafe { tbx_readrec(
                bgzf.as_ptr(),
-               itr.as_mut(),
-               self as *mut TbxRec as *mut c_void,
                tbx.as_mut() as *mut tbx_t as *mut c_void,
+               &mut self.line as *mut kstring_t as *mut c_void,
+               &mut self.tid as *mut c_int,
+               &mut self.begin as *mut HtsPos,
+               &mut self.end as *mut HtsPos
             )} {
                0..=c_int::MAX => Ok(true),
                -1 => Ok(false),
@@ -185,20 +191,16 @@ impl TbxRec {
          Err(hts_err(format!("File {} is not in bgzf format (required for tabix)", fp.name())))
       }
    }
-}
 
-impl HtsRead for TbxRec {
-   fn read(&mut self, hts: &mut Hts) -> io::Result<bool> {
-      let (fp, hdr) = hts.hts_file_and_header();
+   fn read_itr(&mut self, hts: &mut Hts, itr: &mut HtsItr) -> io::Result<bool> {
+      let (fp, tbx) = hts.hts_file_and_tbx();
       if let Some(HtsFileDesc::Bgzf(bgzf)) = fp.file_desc() {
-         let res = if let Some(HtsHdr::Tbx(tbx)) = hdr {
-            match unsafe { tbx_readrec(
+         let res = if let Some(tbx) = tbx {
+            match unsafe { hts_itr_next(
                bgzf.as_ptr(),
+               itr.as_mut(),
+               self as *mut TbxRec as *mut c_void,
                tbx.as_mut() as *mut tbx_t as *mut c_void,
-               &mut self.line as *mut kstring_t as *mut c_void,
-               &mut self.tid as *mut c_int,
-               &mut self.begin as *mut HtsPos,
-               &mut self.end as *mut HtsPos
             )} {
                0..=c_int::MAX => Ok(true),
                -1 => Ok(false),
@@ -220,7 +222,7 @@ extern "C" {
    fn tbx_seqnames(tbx: *const tbx_t, n: *mut c_int) -> *mut *const c_char;
    pub (crate) fn tbx_readrec(fp: *mut BGZF, tbxv: *mut c_void, sv: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int;
    fn tbx_destroy(tbx: *mut tbx_t);
-   fn tbx_name2id(tbx: *const tbx_t, ss: *const c_char) -> c_int;
+   pub(crate) fn tbx_name2id(tbx: *mut c_void, ss: *const c_char) -> c_int;
    pub fn tbx_index_build(fname: *const c_char, min_shift: c_int, conf: *const tbx_conf_t) -> c_int;
 }
 
@@ -241,8 +243,8 @@ impl tbx_t {
          Some(v)
       }
    }
-   pub fn name2id(&self, s: &CStr) -> io::Result<usize> {
-      let x = unsafe { tbx_name2id(self, s.as_ptr())};
+   pub fn name2id(&mut self, s: &CStr) -> io::Result<usize> {
+      let x = unsafe { tbx_name2id(self as *mut tbx_t as *mut c_void, s.as_ptr())};
       if x >= 0 {
          Ok(x as usize)
       } else {
@@ -316,7 +318,7 @@ pub (crate) unsafe extern "C" fn tbx_read_itr(fp: *mut BGZF, data: *mut c_void, 
               *end = tbx_rec.end;
               c
            },
-           Err(e) => -2,
+           Err(_) => -2,
         }
       },
       c => c,
