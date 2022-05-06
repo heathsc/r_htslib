@@ -13,10 +13,10 @@ use crate::{
 
 pub type HtsPos = i64;
 
-pub const HTS_IDX_NOCOOR: HtsPos = -2;
-pub const HTS_IDX_START: HtsPos = -3;
-pub const HTS_IDX_REST: HtsPos = -4;
-pub const HTS_IDX_NONE: HtsPos = -5;
+pub const HTS_IDX_NOCOOR: c_int = -2;
+pub const HTS_IDX_START: c_int = -3;
+pub const HTS_IDX_REST: c_int = -4;
+pub const HTS_IDX_NONE: c_int = -5;
 
 pub const HTS_IDX_SILENT_FAIL: c_int = 2;
 

@@ -9,6 +9,7 @@ use std::{
     ptr::{null, NonNull},
     ops::{Deref, DerefMut},
     ffi::CStr,
+    cmp::Ordering,
 };
 
 use crate::{
@@ -157,16 +158,16 @@ impl Hts {
         }
     }
 
-    pub fn itr_queryi(&mut self, tid: usize, begin: HtsPos, end: HtsPos) -> io::Result<HtsItr> {
+    pub fn itr_query(&mut self, region: &Region) -> io::Result<HtsItr> {
         if !self.has_index() { self.index_load()? }
         let idx= self.index().unwrap();
         let hdr = self.header.as_ref();
 
         if let Some(itr) = NonNull::new(match (hdr, self.tbx.as_ref()) {
-            (_, Some(_)) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, tbx_read_itr) },
-            (Some(HtsHdr::Sam(_)), _) => unsafe { sam_itr_queryi(idx, tid as c_int, begin, end) },
-            (Some(HtsHdr::Vcf(_)), _) if matches!(self.hts_file.format().format, htsExactFormat::Bcf) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, bcf_read_itr) },
-            (Some(HtsHdr::Vcf(_)), _) => unsafe { hts_itr_query(idx, tid as c_int, begin, end, vcf_read_itr) },
+            (_, Some(_)) => unsafe { hts_itr_query(idx, region.tid, region.begin, region.end, tbx_read_itr) },
+            (Some(HtsHdr::Sam(_)), _) => unsafe { sam_itr_queryi(idx, region.tid, region.begin, region.end) },
+            (Some(HtsHdr::Vcf(_)), _) if matches!(self.hts_file.format().format, htsExactFormat::Bcf) => unsafe { hts_itr_query(idx, region.tid, region.begin, region.end, bcf_read_itr) },
+            (Some(HtsHdr::Vcf(_)), _) => unsafe { hts_itr_query(idx, region.tid, region.begin, region.end, vcf_read_itr) },
             (None, None) => return Err(hts_err(format!("Error making iterator for file {}", self.name()))),
         }) {
             Ok(HtsItr { inner: itr, phantom: PhantomData })
@@ -177,21 +178,23 @@ impl Hts {
 
     pub fn itr_querys(&mut self, reg: &CStr) -> io::Result<HtsItr> {
         match reg.to_bytes() {
-            [b'.'] => self.itr_queryi(HTS_IDX_START as usize, 0, 0),
-            [b'*'] => self.itr_queryi(HTS_IDX_NOCOOR as usize, 0, 0),
+            [b'.'] => {
+                let region = Region{tid: HTS_IDX_START, begin: 0, end: 0};
+                self.itr_query(&region)
+            },
+            [b'*'] => {
+                let region = Region{tid: HTS_IDX_NOCOOR, begin: 0, end: 0};
+                self.itr_query(&region)
+            },
             _ => {
-                let (tid, begin, end) = self.parse_region(reg)?;
-                self.itr_queryi(tid as usize, begin, end)
+                let region = self.parse_region(reg)?;
+                self.itr_query(&region)
             },
         }
     }
 
-    fn parse_region(&mut self, reg: &CStr) -> io::Result<(c_int, HtsPos, HtsPos)> {
-        let mut beg: HtsPos = 0;
-        let mut end: HtsPos = 0;
-        let mut tid: c_int = 0;
-
-        let (get_id, hdr):(HtsName2Id, *mut c_void) = if let Some(tbx) = self.tbx.as_mut() {
+    fn get_parse_data(&mut self) -> io::Result<(HtsName2Id, *mut c_void)> {
+        Ok(if let Some(tbx) = self.tbx.as_mut() {
             // Tabix file
             (tbx_name2id, tbx.as_mut() as *mut tbx_t as *mut c_void)
         } else {
@@ -201,29 +204,40 @@ impl Hts {
                 Some(HtsHdr::Sam(h)) => (bam_name2id, h.as_mut() as *mut sam_hdr_t as *mut c_void),
                 _ => return Err(hts_err(format!("Error making iterator for file {}", self.name()))),
             }
-        };
+        })
+    }
+
+    fn _parse_region(get_id: HtsName2Id, hdr: *mut c_void, reg: &CStr) -> io::Result<Region> {
+        let mut region = Region::new();
 
         if unsafe {
-            hts_parse_region(reg.as_ptr(), &mut tid, &mut beg, &mut end, get_id, hdr, HTS_PARSE_THOUSANDS_SEP)
+            hts_parse_region(reg.as_ptr(), &mut region.tid, &mut region.begin, &mut region.end, get_id, hdr, HTS_PARSE_THOUSANDS_SEP)
         }.is_null() { return Err(hts_err(format!("Error parsing region {:?}", reg))) }
 
-        Ok((tid, beg, end))
+        Ok(region)
     }
 
-    pub fn reader<T>(&mut self) -> HtsReader<T> {
-        HtsReader {
-            hts: self,
-            _phantom: PhantomData,
-        }
+    fn parse_region(&mut self, reg: &CStr) -> io::Result<Region> {
+        let (get_id, hdr) = self.get_parse_data()?;
+        Self::_parse_region(get_id, hdr, reg)
     }
 
-    pub fn itr_reader<T>(&mut self, itr: HtsItr) -> HtsItrReader<T> {
-        HtsItrReader {
-            hts: self,
-            itr,
-            _phantom: PhantomData,
+    pub fn make_region_list(&mut self, regs: &[&str]) -> RegionList {
+        let mut rlist = RegionList::new();
+        if let Ok((get_id, hdr)) = self.get_parse_data() {
+            for reg in regs {
+                let r = get_cstr(reg);
+                if let Ok(region) = Self::_parse_region(get_id, hdr, r.as_ref()) {
+                    rlist.add_region(region)
+                }
+            }
         }
+        rlist
     }
+
+    pub fn reader<T>(&mut self) -> HtsReader<T> { HtsReader::new(self) }
+
+    pub fn itr_reader<'a, 'b, T>(&'a mut self, regions: &'b [Region]) -> HtsItrReader<'a, 'b, T> { HtsItrReader::new(self, regions) }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -474,6 +488,15 @@ pub struct HtsReader<'a, T> {
     _phantom: PhantomData<T>,
 }
 
+impl <'a, T> HtsReader<'a, T> {
+    pub fn new(hts: &'a mut Hts) -> Self {
+        Self {
+            hts,
+            _phantom: PhantomData
+        }
+    }
+}
+
 impl <'a, T: HtsRead> HtsReader<'a, T> {
     pub fn read(&mut self, rec: &mut T) -> io::Result<bool> {
         rec.read(self.hts)
@@ -484,15 +507,59 @@ impl <'a, T: HtsRead> HtsReader<'a, T> {
     }
 }
 
-pub struct HtsItrReader<'a, T> {
+pub struct HtsItrReader<'a, 'b, T>
+// where R: IntoIterator<Item = Region>,
+{
     hts: &'a mut Hts,
-    itr: HtsItr,
+    region_itr: std::slice::Iter<'b, Region>,
+    itr: Option<HtsItr>,
     _phantom: PhantomData<T>,
 }
 
-impl <'a, T: HtsRead> HtsItrReader<'a, T> {
+impl <'a, 'b, T> HtsItrReader<'a, 'b, T> {
+    pub fn new(hts: &'a mut Hts, regions: &'b [Region]) -> Self
+    {
+        let region_itr = regions.into_iter();
+        Self {
+            hts,
+            region_itr,
+            itr: None,
+            _phantom: PhantomData
+        }
+    }
+}
+
+/*
+impl <'a, T, R:IntoIterator<Item=Region>> HtsItrReader<'a, T, R> {
+    pub fn new(hts: &'a mut Hts, regions: R) -> Self
+    {
+        let region_itr = regions.into_iter();
+        Self {
+            hts,
+            region_itr,
+            itr: None,
+            _phantom: PhantomData
+        }
+    }
+}*/
+
+impl <'a, 'b, T: HtsRead> HtsItrReader<'a, 'b, T> {
     pub fn read(&mut self, rec: &mut T) -> io::Result<bool> {
-        rec.read_itr(self.hts, &mut self.itr)
+        loop {
+            if self.itr.is_none() {
+                if let Some(reg) = self.region_itr.next() {
+                    self.itr = self.hts.itr_query(&reg).ok();
+                } else {
+                    break
+                }
+            }
+            if let Some(itr) = self.itr.as_mut() {
+                let r = rec.read_itr(self.hts, itr)?;
+                if r { return Ok(true) }
+                self.itr = None;
+            } else { break }
+        }
+        Ok(false)
     }
 
     pub fn header(&self) -> Option<&HtsHdr> {
@@ -500,3 +567,78 @@ impl <'a, T: HtsRead> HtsItrReader<'a, T> {
     }
 }
 
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub struct Region {
+    tid: c_int,
+    begin: HtsPos,
+    end: HtsPos,
+}
+
+impl Region {
+    pub fn new() -> Self { Self::default() }
+}
+
+impl Ord for Region {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.tid.cmp(&other.tid) {
+            Ordering::Equal => match self.begin.cmp(&other.begin) {
+                Ordering::Equal => self.end.cmp(&other.end),
+                ord => ord,
+            },
+            ord => ord,
+        }
+    }
+}
+
+impl PartialOrd for Region {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+
+#[derive(Debug, Default)]
+pub struct RegionList {
+    regions: Vec<Region>,
+}
+
+impl Deref for RegionList {
+    type Target = [Region];
+    #[inline]
+    fn deref(&self) -> &[Region] { &self.regions }
+}
+
+impl IntoIterator for RegionList {
+    type Item = Region;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.regions.into_iter()
+    }
+}
+
+impl RegionList {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn add_region(&mut self, reg: Region) { self.regions.push(reg) }
+
+    pub fn merge(&mut self) {
+        if self.regions.len() > 1 {
+            // Sort regions
+            self.regions.sort();
+            // Check for overlaps
+            if self.regions.windows(2).any(|v| v[0].tid == v[1].tid && v[0].end >= v[1].begin) {
+                // If we have overlaps, construct a new list, merging overlapping regions
+                let mut nlist = Vec::new();
+                let mut prev = self.regions[0];
+                for r in self.regions.drain(1..) {
+                    if prev.tid == r.tid && prev.end >= r.begin {
+                        prev.end = prev.end.max(prev.end)
+                    } else {
+                        nlist.push(prev);
+                        prev = r
+                    }
+                }
+                nlist.push(prev);
+                self.regions = nlist;
+            }
+        }
+    }
+}
