@@ -41,13 +41,14 @@ pub struct tbx_t {
 #[derive(Debug, Default)]
 #[repr(C)]
 pub struct TbxRec {
-   tid: c_int,
-   begin: HtsPos,
-   end: HtsPos,
-   line: kstring_t,
+   pub tid: c_int,
+   pub begin: HtsPos,
+   pub end: HtsPos,
+   pub line: kstring_t,
 }
 
 unsafe impl Send for TbxRec {}
+unsafe impl Sync for TbxRec {}
 
 impl TbxRec {
    pub fn new() -> Self { Self::default() }
@@ -227,11 +228,11 @@ extern "C" {
 }
 
 impl tbx_t {
-   pub fn seq_names(&self) -> Option<Vec<&str>> {
+   pub fn seq_names(&self) -> Vec<&str> {
       let mut n_seq: c_int = 0;
       let p = unsafe{tbx_seqnames(self, &mut n_seq as *mut c_int)};
       if p.is_null() {
-         None
+         Vec::new()
       } else {
          let mut v = Vec::with_capacity(n_seq as usize);
          for i in 0..n_seq {
@@ -240,7 +241,7 @@ impl tbx_t {
             v.push(str_slice);
          }
          unsafe {libc::free(p as *mut c_void)};
-         Some(v)
+         v
       }
    }
    pub fn name2id(&mut self, s: &CStr) -> io::Result<usize> {
@@ -259,6 +260,9 @@ pub struct Tbx {
    inner: NonNull<tbx_t>,
    phantom: PhantomData<tbx_t>,
 }
+
+unsafe impl Send for Tbx {}
+unsafe impl Sync for Tbx {}
 
 impl Deref for Tbx {
    type Target = tbx_t;

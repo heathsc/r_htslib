@@ -115,16 +115,16 @@ impl kstring_t {
     }
     pub fn bcf_enc_int1(&mut self, x: c_int) -> bool {
         if x == bcf_int32_vector_end {
-            self.bcf_enc_size(1, BCF_BT_INT8) || self.putc(bcf_int8_vector_end as c_char)
+            self.bcf_enc_size(1, BCF_BT_INT8 as u8) || self.putc(bcf_int8_vector_end as c_char)
         } else if x == bcf_int32_missing {
-            self.bcf_enc_size(1, BCF_BT_INT8) || self.putc(bcf_int8_missing as c_char)
+            self.bcf_enc_size(1, BCF_BT_INT8 as u8) || self.putc(bcf_int8_missing as c_char)
         } else if x <= BCF_MAX_BT_INT8 && x >= BCF_MIN_BT_INT8 {
-            self.bcf_enc_size(1, BCF_BT_INT8) || self.putc(x as c_char)
+            self.bcf_enc_size(1, BCF_BT_INT8 as u8) || self.putc(x as c_char)
         } else if x <= BCF_MAX_BT_INT16 && x >= BCF_MIN_BT_INT16 {
-            self.bcf_enc_size(1, BCF_BT_INT16)
+            self.bcf_enc_size(1, BCF_BT_INT16 as u8)
                 || self.putsn((x as u16).to_le_bytes().as_ptr() as *const i8, 2)
         } else {
-            self.bcf_enc_size(1, BCF_BT_INT32)
+            self.bcf_enc_size(1, BCF_BT_INT32 as u8)
                 || self.putsn(x.to_le_bytes().as_ptr() as *const i8, 4)
         }
     }

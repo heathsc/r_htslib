@@ -2,14 +2,15 @@ use std::io;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::ops::{Deref, DerefMut};
-use std::convert::{AsRef, AsMut};
+use std::convert::{AsRef, AsMut, TryFrom};
+use std::ffi::CStr;
 
 pub mod lib;
 pub use lib::*;
 
 use super::{
     from_cstr, get_cstr, htsFile, hts_err, kstring_t, Hts, HtsFile, HtsPos, HtsHdr,
-    HtsRead, HtsItr, BGZF, hts_itr_next, HtsFileDesc
+    HtsRead, HtsWrite, HtsItr, BGZF, hts_itr_next, HtsFileDesc
 };
 use libc::{c_int, c_void};
 
@@ -41,14 +42,21 @@ impl AsMut<bcf_hdr_t> for VcfHeader {
 }
 
 impl VcfHeader {
-    pub fn new(mode: &str) -> io::Result<VcfHeader> {
+    pub fn new(mode: &str) -> io::Result<Self> {
         match NonNull::new(unsafe { bcf_hdr_init(get_cstr(mode).as_ptr()) }) {
             None => Err(hts_err("Couldn't create VCF/BCF header".to_string())),
             Some(hdr) => Ok(VcfHeader { inner: hdr , phantom: PhantomData}),
         }
     }
 
-    pub fn read(fp: &mut HtsFile) -> io::Result<VcfHeader> {
+    pub fn dup(&self) -> io::Result<Self> {
+        match NonNull::new(unsafe { bcf_hdr_dup(self.as_ref()) }) {
+            None => Err(hts_err("Couldn't duplicate VCF/BCF header".to_string())),
+            Some(hdr) => Ok(VcfHeader { inner: hdr , phantom: PhantomData}),
+        }
+    }
+
+    pub fn read(fp: &mut HtsFile) -> io::Result<Self> {
         match NonNull::new(unsafe{bcf_hdr_read(fp.as_mut())}) {
             None => Err(hts_err(format!("Failed to load header from {}", fp.name()))),
             Some(p) => {
@@ -57,6 +65,23 @@ impl VcfHeader {
                     phantom: PhantomData,
                 })
             },
+        }
+    }
+
+    pub fn seq_names(&self) -> Vec<&str> {
+        let mut n_seq: c_int = 0;
+        let p = unsafe{bcf_hdr_seqnames(self.as_ref(), &mut n_seq as *mut c_int)};
+        if p.is_null() {
+            Vec::new()
+        } else {
+            let mut v = Vec::with_capacity(n_seq as usize);
+            for i in 0..n_seq {
+                let c_str: &CStr = unsafe { CStr::from_ptr(*p.offset(i as isize)) };
+                let str_slice: &str = c_str.to_str().unwrap();
+                v.push(str_slice);
+            }
+            unsafe {libc::free(p as *mut c_void)};
+            v
         }
     }
 
@@ -105,6 +130,18 @@ impl VcfHeader {
             _ => Err(hts_err("Error adding sample to VCF/BCF header".to_string())),
         }
     }
+
+    pub fn fmt<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::fmt(self, tag) }
+
+    pub fn info<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::fmt(self, tag) }
+
+    pub fn flt<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::fmt(self, tag) }
+}
+
+impl Clone for VcfHeader {
+    fn clone(&self) -> Self {
+        self.dup().expect("Error duplicating VCF/BCF header")
+    }
 }
 
 impl Drop for VcfHeader {
@@ -121,6 +158,7 @@ pub struct BcfRec {
 }
 
 unsafe impl Send for BcfRec {}
+unsafe impl Sync for BcfRec {}
 
 impl Deref for BcfRec {
     type Target = bcf1_t;
@@ -183,6 +221,23 @@ impl HtsRead for BcfRec {
     }
 }
 
+impl HtsWrite for BcfRec {
+    fn write(&mut self, hts: &mut Hts) -> io::Result<()> {
+        let (fp, hdr) = hts.hts_file_and_header();
+        let hts_file = fp.as_mut();
+        let res = if let Some(HtsHdr::Vcf(hd)) = hdr {
+            let i = unsafe { bcf_write(hts_file, hd.as_mut(), self.as_mut()) };
+            match i {
+                0 => Ok(()),
+                _ => Err(hts_err("Error writing VCF/BCF record".to_string())),
+            }
+        } else {
+            Err(hts_err(format!("Appropriate header not found for file {}", fp.name())))
+        };
+        res
+    }
+}
+
 impl BcfRec {
     pub fn new() -> io::Result<Self> {
         match NonNull::new(unsafe { bcf_init() }) {
@@ -206,13 +261,13 @@ impl BcfRec {
     pub fn set_qual(&mut self, qual: f32) {
         self.as_mut().qual = qual
     }
-    pub fn write(&mut self, file: &mut HtsFile, hdr: &mut VcfHeader) -> io::Result<()> {
-        if unsafe { bcf_write(file.as_mut(), hdr.as_mut(), self.as_mut()) } < 0 {
-            Err(hts_err("Error writing out VCF record".to_string()))
-        } else {
-            Ok(())
-        }
-    }
+
+    pub fn n_allele(&self) -> u16 { self.as_ref().n_allele() }
+    pub fn n_info(&self) -> u16 { self.as_ref().n_info() }
+    pub fn n_fmt(&self) -> u8 { self.as_ref().n_fmt() }
+    pub fn qual(&self) -> f32 { self.as_ref().qual }
+    pub fn n_sample(&self) -> u32 { self.as_ref().n_sample() }
+
     pub fn format(&mut self, hdr: &HtsHdr, s: &mut kstring_t) -> io::Result<()>{
         s.clear();
         if let HtsHdr::Vcf(h) = hdr {
@@ -234,3 +289,144 @@ impl Drop for BcfRec {
     }
 }
 
+pub struct BcfHdrTag<'a, T: BcfHeaderVar<'a>> {
+    tag: String,
+    tag_hl: BcfHeaderLine,
+    tag_id: isize,
+    n_samples: usize,
+    phantom: PhantomData<&'a T>,
+}
+
+impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
+    pub fn new(hdr: &VcfHeader, tag: &str, tag_hl: BcfHeaderLine) -> io::Result<BcfHdrTag<'a, T>> {
+        if tag_hl > BcfHeaderLine::Fmt {
+            return Err(hts_err("Bad Header line type used for BcfHeaderVar".to_string()))
+        }
+        let hlt = tag_hl as usize;
+        let ctag = get_cstr(tag);
+        let tag_id = match unsafe { bcf_hdr_id2int(hdr.as_ref(), BCF_DT_ID as c_int, ctag.as_ptr())} {
+            c_int::MIN..=-1 => return Err(hts_err(format!("Unknown header tag {}", tag))),
+            id => id as isize,
+        };
+        let info = unsafe {(*(*hdr.as_ref().id[BCF_DT_ID as usize].offset(tag_id)).val).info[hlt] };
+        if (info & 0xf) == 0xf {
+            return Err(hts_err(format!("Unknown header tag {} of type {:?}", tag, tag_hl)))
+        }
+        let ty = BcfHeaderType::try_from((info >> 4) & 0xf).expect("Illegal header var type");
+        if tag == "GT" {
+            if ty != BcfHeaderType::Str { return Err(hts_err(format!("Incorrect header variable type for GT tag {}", tag))) }
+            if T::hdr_type() != BcfHeaderType::Int { return Err(hts_err(format!("Incorrect variable type for GT tag {}", tag))) }
+        } else if ty != T::hdr_type() {
+            return Err(hts_err(format!("Incorrect variable type for header tag {}", tag)))
+        }
+        let tag = tag.to_owned();
+        let n_samples = hdr.n_samples();
+        assert!(n_samples >= 0);
+
+        Ok(Self{tag, tag_hl, tag_id, n_samples: n_samples as usize, phantom: PhantomData})
+    }
+
+    pub fn fmt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Fmt) }
+
+    pub fn info(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Info) }
+
+    pub fn flt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Flt) }
+
+    pub fn get(&self, rec: &'a mut BcfRec) -> Option<BcfVecIter<'a, T>> {
+        match self.tag_hl {
+            BcfHeaderLine::Fmt => {
+                self.get_fmt(rec)
+            },
+            _ => panic!("Not handled")
+        }
+    }
+
+    pub fn get_fmt(&self, rec: &'a mut BcfRec) -> Option<BcfVecIter<'a, T>> {
+        if (rec.unpacked as usize) & BCF_UN_FMT == 0 { rec.unpack(BCF_UN_FLT)}
+        let n_fmt = rec.n_fmt() as usize;
+        println!("n_fmt = {}", n_fmt);
+        if n_fmt > 0 {
+            let p = rec.d.fmt;
+            assert!(!p.is_null());
+            let v = unsafe { std::slice::from_raw_parts(p, n_fmt) };
+            let fmt = v.iter().find(|f| f.id == (self.tag_id as c_int));
+            fmt.and_then(|f| {
+                NonNull::new(f.p).map(|p| (p, f.n, f.size, f.type_size(), f.vtype))
+            })
+               .map(|(p, n, size, type_size, vtype)| {
+                   assert!(n > 0 && size > 0 && type_size > 0, "BCF vector length or size is zero!");
+                   println!("n: {}, size: {}, type_size: {}", n, size, type_size);
+                   let (n, type_size) = if vtype == BCF_BT_CHAR {
+                       (1, n as usize)
+                   } else {
+                       (n as usize, type_size as usize)
+                   };
+                   BcfVecIter{ inner: BcfGenIter{p, n, size: type_size, phantom: PhantomData}, size: size as usize, n_vec: self.n_samples }
+               })
+        } else { None }
+    }
+}
+
+pub struct BcfGenIter<'a, T> {
+    p: NonNull<u8>,
+    n: usize,
+    size: usize,
+    phantom: PhantomData<&'a T>,
+}
+
+pub struct BcfVecIter<'a, T> {
+    inner: BcfGenIter<'a, T>,
+    size: usize,
+    n_vec: usize,
+}
+
+impl <'a, T>Iterator for BcfVecIter<'a, T>
+where T: BcfHeaderVar<'a>,
+{
+    type Item = BcfValIter<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.n_vec == 0 {
+            None
+        } else {
+            let iter = BcfValIter{ inner: BcfGenIter{p: self.inner.p, n: self.inner.n, size: self.inner.size, phantom: PhantomData}, missing: false};
+            self.inner.p = unsafe { NonNull::new_unchecked(self.inner.p.as_ptr().offset(self.size as isize)) };
+            self.n_vec -= 1;
+            Some(iter)
+        }
+    }
+}
+
+pub struct BcfValIter<'a, T> {
+    inner: BcfGenIter<'a, T>,
+    missing: bool,
+}
+
+impl <'a, T>Iterator for BcfValIter<'a, T>
+    where T: BcfHeaderVar<'a>,
+{
+    type Item = Option<T::Item>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.inner.n == 0 {
+            None
+        } else {
+            self.inner.n -= 1;
+            Some(
+                if self.missing { None } else {
+                    let p = unsafe {std::slice::from_raw_parts(self.inner.p.as_ref(), self.inner.size)};
+                    let x = match T::try_parse(p).expect("BCF parse error") {
+                        BcfOpt::Some(c) => Some(c),
+                        BcfOpt::Missing => None,
+                        BcfOpt::EndOfVec => {
+                            self.missing = true;
+                            None
+                        },
+                    };
+                    self.inner.p = unsafe { NonNull::new_unchecked(self.inner.p.as_ptr().offset(self.inner.size as isize)) };
+                    x
+                }
+            )
+        }
+    }
+}

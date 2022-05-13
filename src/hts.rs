@@ -8,8 +8,10 @@ use std::{
     marker::PhantomData,
     ptr::{null, NonNull},
     ops::{Deref, DerefMut},
-    ffi::CStr,
+    ffi::{CStr, CString},
     cmp::Ordering,
+    path::Path,
+    os::unix::ffi::OsStrExt,
 };
 
 use crate::{
@@ -26,17 +28,18 @@ pub struct Hts {
 }
 
 unsafe impl Send for Hts {}
+unsafe impl Sync for Hts {}
 
 impl Hts {
-    pub fn open<S: AsRef<str>>(name: S, mode: &str) -> io::Result<Self> {
+    pub fn open<S: AsRef<Path>>(name: S, mode: &str) -> io::Result<Self> {
         Self::open_format_(name, mode, None)
     }
 
-    pub fn open_format<S: AsRef<str>>(name: S, mode: &str, fmt: &HtsFormat) -> io::Result<Self> {
+    pub fn open_format<S: AsRef<Path>>(name: S, mode: &str, fmt: &HtsFormat) -> io::Result<Self> {
         Self::open_format_(name, mode, Some(fmt))
     }
 
-    fn open_format_<S: AsRef<str>>(name: S, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self> {
+    fn open_format_<S: AsRef<Path>>(name: S, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self> {
         let name = name.as_ref();
         let mut fp = HtsFile::open_format_(name, mode, fmt)?;
         let (header, tbx) = if fp.as_ref().is_write() == 0 {
@@ -58,6 +61,12 @@ impl Hts {
     pub fn header(&self) -> Option<&HtsHdr> { self.header.as_ref() }
 
     pub fn header_mut(&mut self) -> Option<&mut HtsHdr> { self.header.as_mut() }
+
+    pub fn seq_names(&self) -> Vec<&str> {
+        if let Some(h) = self.header.as_ref() { h.seq_names() }
+        else if let Some(t) = self.tbx.as_ref() { t.seq_names() }
+        else { Vec::new() }
+    }
 
     pub fn tbx(&self) -> Option<&Tbx> { self.tbx.as_ref() }
 
@@ -222,7 +231,7 @@ impl Hts {
         Self::_parse_region(get_id, hdr, reg)
     }
 
-    pub fn make_region_list(&mut self, regs: &[&str]) -> RegionList {
+    pub fn make_region_list<S: AsRef<str>>(&mut self, regs: &[S]) -> RegionList {
         let mut rlist = RegionList::new();
         if let Ok((get_id, hdr)) = self.get_parse_data() {
             for reg in regs {
@@ -257,6 +266,7 @@ pub struct HtsFile {
 }
 
 unsafe impl Send for HtsFile {}
+unsafe impl Sync for HtsFile {}
 
 impl Deref for HtsFile {
     type Target = htsFile;
@@ -286,22 +296,23 @@ impl Drop for HtsFile {
 }
 
 impl HtsFile {
-    pub fn open<S: AsRef<str>>(name: S, mode: &str) -> io::Result<Self> {
+    pub fn open<S: AsRef<Path>>(name: S, mode: &str) -> io::Result<Self> {
         Self::open_format_(name, mode, None)
     }
 
-    pub fn open_format<S: AsRef<str>>(name: S, mode: &str, fmt: &HtsFormat) -> io::Result<Self> {
+    pub fn open_format<S: AsRef<Path>>(name: S, mode: &str, fmt: &HtsFormat) -> io::Result<Self> {
         Self::open_format_(name, mode, Some(fmt))
     }
 
-    fn open_format_<S: AsRef<str>>(name: S, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self> {
+    fn open_format_<S: AsRef<Path>>(name: S, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self> {
         let name = name.as_ref();
         let mode = get_cstr(mode);
         let fmt = match fmt {
             Some(f) => f.inner.as_ptr(),
             None => null(),
         };
-        if let Some(hfile) = NonNull::new(unsafe { hts_open_format(get_cstr(name).as_ptr(), mode.as_ptr(), fmt) }) {
+        let cname = CString::new(name.as_os_str().as_bytes()).unwrap();
+        if let Some(hfile) = NonNull::new(unsafe { hts_open_format(cname.as_ptr(), mode.as_ptr(), fmt) }) {
             assert!(!unsafe {hfile.as_ref()}.fn_.is_null());
             let hfile = hfile.cast::<htsFile>();
             Ok(HtsFile {
@@ -309,7 +320,7 @@ impl HtsFile {
                 phantom: PhantomData,
             })
         } else {
-            Err(hts_err(format!("Couldn't open file {}", name)))
+            Err(hts_err(format!("Couldn't open file {}", name.display())))
         }
     }
 
@@ -322,10 +333,19 @@ impl HtsFile {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HtsHdr {
     Vcf(VcfHeader),
     Sam(SamHeader),
+}
+
+impl HtsHdr {
+    pub fn seq_names(&self) -> Vec<&str> {
+        match self {
+            HtsHdr::Vcf(h) => h.seq_names(),
+            HtsHdr::Sam(h) => h.seq_names(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -336,6 +356,7 @@ pub struct HtsThreadPool {
 }
 
 unsafe impl Send for HtsThreadPool {}
+unsafe impl Sync for HtsThreadPool {}
 
 impl Drop for HtsThreadPool {
     fn drop(&mut self) {
@@ -360,6 +381,7 @@ pub struct HtsIndex {
 }
 
 unsafe impl Send for HtsIndex {}
+unsafe impl Sync for HtsIndex {}
 
 impl Deref for HtsIndex {
     type Target = hts_idx_t;
@@ -483,6 +505,10 @@ pub trait HtsRead {
     fn read_itr(&mut self, hts: &mut Hts, itr: &mut HtsItr) -> io::Result<bool>;
 }
 
+pub trait HtsWrite {
+    fn write(&mut self, hts: &mut Hts) -> io::Result<()>;
+}
+
 pub struct HtsReader<'a, T> {
     hts: &'a mut Hts,
     _phantom: PhantomData<T>,
@@ -508,7 +534,6 @@ impl <'a, T: HtsRead> HtsReader<'a, T> {
 }
 
 pub struct HtsItrReader<'a, 'b, T>
-// where R: IntoIterator<Item = Region>,
 {
     hts: &'a mut Hts,
     region_itr: std::slice::Iter<'b, Region>,
@@ -528,20 +553,6 @@ impl <'a, 'b, T> HtsItrReader<'a, 'b, T> {
         }
     }
 }
-
-/*
-impl <'a, T, R:IntoIterator<Item=Region>> HtsItrReader<'a, T, R> {
-    pub fn new(hts: &'a mut Hts, regions: R) -> Self
-    {
-        let region_itr = regions.into_iter();
-        Self {
-            hts,
-            region_itr,
-            itr: None,
-            _phantom: PhantomData
-        }
-    }
-}*/
 
 impl <'a, 'b, T: HtsRead> HtsItrReader<'a, 'b, T> {
     pub fn read(&mut self, rec: &mut T) -> io::Result<bool> {
@@ -569,9 +580,9 @@ impl <'a, 'b, T: HtsRead> HtsItrReader<'a, 'b, T> {
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct Region {
-    tid: c_int,
-    begin: HtsPos,
-    end: HtsPos,
+    pub tid: c_int,
+    pub begin: HtsPos,
+    pub end: HtsPos,
 }
 
 impl Region {
@@ -603,15 +614,6 @@ impl Deref for RegionList {
     type Target = [Region];
     #[inline]
     fn deref(&self) -> &[Region] { &self.regions }
-}
-
-impl IntoIterator for RegionList {
-    type Item = Region;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.regions.into_iter()
-    }
 }
 
 impl RegionList {

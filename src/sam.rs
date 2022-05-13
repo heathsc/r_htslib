@@ -7,7 +7,7 @@ use std::{fmt, io};
 
 use crate::{
    get_cstr, htsFile, hts_err, kstring_t, Hts, HtsFile,
-   HtsHdr, HtsItr, HtsRead, BGZF, hts_itr_next, hts_itr_multi_next,
+   HtsHdr, HtsItr, HtsRead, HtsWrite, BGZF, hts_itr_next, hts_itr_multi_next,
 };
 
 use libc::{c_char, c_int, c_void};
@@ -82,8 +82,18 @@ impl SamHeader {
          }),
       }
    }
+
+   pub fn seq_names(&self) -> Vec<&str> {
+      let n = self.nref();
+      (0..n).map(|i| self.tid2name(i)).collect()
+   }
 }
 
+impl Clone for SamHeader {
+   fn clone(&self) -> Self {
+      self.dup().expect("Error duplicating SAM/BAM header")
+   }
+}
 
 #[derive(Debug)]
 pub struct BamRec {
@@ -113,6 +123,7 @@ impl AsMut<bam1_t> for BamRec {
 }
 
 unsafe impl Send for BamRec {}
+unsafe impl Sync for BamRec {}
 
 impl HtsRead for BamRec {
    fn read(&mut self, hts: &mut Hts) -> io::Result<bool> {
@@ -123,7 +134,7 @@ impl HtsRead for BamRec {
          match unsafe { sam_read1(hts_file, hd.as_mut(), self.as_mut()) } {
             0..=c_int::MAX => Ok(true),
             -1 => Ok(false),
-            _ => Err(hts_err("Error reading SAM/BAM record".to_string())),
+            _ => Err(hts_err("Error reading SAM/BAM/CRAM record".to_string())),
          }
       } else {
          Err(hts_err(format!("Appropriate header not found for file {}", fp.name())))
@@ -150,6 +161,22 @@ impl HtsRead for BamRec {
       } else {
          Err(hts_err("Error reading record".to_string()))
       }
+   }
+}
+
+impl HtsWrite for BamRec {
+   fn write(&mut self, hts: &mut Hts) -> io::Result<()> {
+      let (fp, hdr) = hts.hts_file_and_header();
+      let hts_file = fp.as_mut();
+      let res = if let Some(HtsHdr::Sam(hd)) = hdr {
+         match unsafe { sam_write1(hts_file, hd.as_mut(), self.as_mut()) } {
+            0..=c_int::MAX => Ok(()),
+            _ => Err(hts_err("Error writing SAM/BAM/CRAM record".to_string())),
+         }
+      } else {
+         Err(hts_err(format!("Appropriate header not found for file {}", fp.name())))
+      };
+      res
    }
 }
 

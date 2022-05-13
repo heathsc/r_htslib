@@ -29,6 +29,7 @@ pub struct Faidx {
 }
 
 unsafe impl Send for Faidx {}
+unsafe impl Sync for Faidx {}
 
 impl Faidx {
     fn inner(&self) -> &faidx_t {
