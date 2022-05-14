@@ -114,7 +114,10 @@ impl TryFrom<u16> for BcfHeaderType {
          2 => Ok(Self::Real),
          3 => Ok(Self::Str),
          0x101 => Ok(Self::Long),
-         _ => Err("Bad BCF Header type"),
+         _ => {
+            eprintln!("OOOK! {}", value);
+            Err("Bad BCF Header type")
+         },
       }
    }
 }
@@ -455,8 +458,8 @@ pub(super) struct bcf_dec_t {
    m_als: c_int,
    m_allele: c_int,
    m_flt: c_int,
-   n_flt: c_int,
-   flt: *mut c_int,
+   pub(super) n_flt: c_int,
+   pub(super) flt: *mut c_int,
    id: *mut c_char,
    als: *mut c_char,
    alleles: *mut *mut c_char,

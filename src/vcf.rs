@@ -135,7 +135,7 @@ impl VcfHeader {
 
     pub fn info<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::info(self, tag) }
 
-    pub fn flt<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::flt(self, tag) }
+    pub fn flt<'a>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, BcfHdrFlag>> { BcfHdrTag::flt(self, tag) }
 }
 
 impl Clone for VcfHeader {
@@ -286,6 +286,8 @@ impl BcfRec {
 
     pub fn get_info<'a, T: BcfHeaderVar<'a>>( &'a mut self , htag: & BcfHdrTag<'a, T>) -> Option<BcfValIter<'a, T>> { htag.get_info(self) }
 
+    pub fn get_flt<'a>( &'a mut self , htag: & BcfHdrTag<'a, BcfHdrFlag>) -> bool { htag.get_flt(self) }
+
 }
 
 impl Drop for BcfRec {
@@ -302,10 +304,11 @@ pub struct BcfHdrTag<'a, T: BcfHeaderVar<'a>> {
 }
 
 impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
-    pub fn new(hdr: &VcfHeader, tag: &str, tag_hl: BcfHeaderLine) -> io::Result<BcfHdrTag<'a, T>> {
+    pub fn new(hdr: &VcfHeader, mut tag: &str, tag_hl: BcfHeaderLine) -> io::Result<BcfHdrTag<'a, T>> {
         if tag_hl > BcfHeaderLine::Fmt {
             return Err(hts_err("Bad Header line type used for BcfHeaderVar".to_string()))
         }
+        if tag_hl == BcfHeaderLine::Flt && tag == "." { tag = "PASS" }
         let hlt = tag_hl as usize;
         let ctag = get_cstr(tag);
         let tag_id = match unsafe { bcf_hdr_id2int(hdr.as_ref(), BCF_DT_ID as c_int, ctag.as_ptr())} {
@@ -316,7 +319,9 @@ impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
         if (info & 0xf) == 0xf {
             return Err(hts_err(format!("Unknown header tag {} of type {:?}", tag, tag_hl)))
         }
-        let ty = BcfHeaderType::try_from((info >> 4) & 0xf).expect("Illegal header var type");
+        let ty = if tag_hl == BcfHeaderLine::Flt { BcfHeaderType::Flag } else {
+            BcfHeaderType::try_from((info >> 4) & 0xf).expect("Illegal header var type")
+        };
         if tag == "GT" {
             if ty != BcfHeaderType::Str { return Err(hts_err(format!("Incorrect header variable type for GT tag {}", tag))) }
             if T::hdr_type() != BcfHeaderType::Int { return Err(hts_err(format!("Incorrect variable type for GT tag {}", tag))) }
@@ -333,7 +338,7 @@ impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
 
     pub fn info(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Info) }
 
-    pub fn flt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Flt) }
+    pub fn flt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T >> { Self::new(hdr, tag, BcfHeaderLine::Flt) }
 
     pub fn get_info(&self, rec: &'a mut BcfRec) -> Option<BcfValIter<'a, T>> {
         assert_eq!(self.tag_hl, BcfHeaderLine::Info, "Wrong tag type - expected Info tag");
@@ -360,7 +365,7 @@ impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
 
     pub fn get_fmt(&self, rec: &'a mut BcfRec) -> Option<BcfVecIter<'a, T>> {
         assert_eq!(self.tag_hl, BcfHeaderLine::Fmt, "Wrong tag type - expected Format tag");
-        if (rec.unpacked as usize) & BCF_UN_FMT == 0 { rec.unpack(BCF_UN_FLT)}
+        if (rec.unpacked as usize) & BCF_UN_FMT == 0 { rec.unpack(BCF_UN_FMT)}
         let n_fmt = rec.n_fmt() as usize;
         if n_fmt > 0 {
             let p = rec.d.fmt;
@@ -379,6 +384,20 @@ impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
                    })})
 
         } else { None }
+    }
+
+    pub fn get_flt(&self, rec: &'a mut BcfRec) -> bool {
+        assert_eq!(self.tag_hl, BcfHeaderLine::Flt, "Wrong tag type - expected Filter tag");
+        if (rec.unpacked as usize) & BCF_UN_FLT == 0 { rec.unpack(BCF_UN_FLT)}
+        assert!(rec.d.n_flt >= 0);
+        let n_flt = rec.d.n_flt as usize;
+        if self.tag_id == 0 && n_flt == 0 { true }
+        else {
+            let p = rec.d.flt;
+            assert!(!p.is_null());
+            unsafe { std::slice::from_raw_parts(p, n_flt) }
+               .iter().any(|i|  *i == (self.tag_id as c_int))
+        }
     }
 }
 
