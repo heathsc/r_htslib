@@ -133,9 +133,9 @@ impl VcfHeader {
 
     pub fn fmt<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::fmt(self, tag) }
 
-    pub fn info<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::fmt(self, tag) }
+    pub fn info<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::info(self, tag) }
 
-    pub fn flt<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::fmt(self, tag) }
+    pub fn flt<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::flt(self, tag) }
 }
 
 impl Clone for VcfHeader {
@@ -284,6 +284,8 @@ impl BcfRec {
 
     pub fn get_fmt<'a, T: BcfHeaderVar<'a>>( &'a mut self , htag: & BcfHdrTag<'a, T>) -> Option<BcfVecIter<'a, T>> { htag.get_fmt(self) }
 
+    pub fn get_info<'a, T: BcfHeaderVar<'a>>( &'a mut self , htag: & BcfHdrTag<'a, T>) -> Option<BcfValIter<'a, T>> { htag.get_info(self) }
+
 }
 
 impl Drop for BcfRec {
@@ -333,37 +335,49 @@ impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
 
     pub fn flt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Flt) }
 
-    pub fn get(&self, rec: &'a mut BcfRec) -> Option<BcfVecIter<'a, T>> {
-        match self.tag_hl {
-            BcfHeaderLine::Fmt => {
-                self.get_fmt(rec)
-            },
-            _ => panic!("Not handled")
-        }
+    pub fn get_info(&self, rec: &'a mut BcfRec) -> Option<BcfValIter<'a, T>> {
+        assert_eq!(self.tag_hl, BcfHeaderLine::Info, "Wrong tag type - expected Info tag");
+        if (rec.unpacked as usize) & BCF_UN_INFO == 0 { rec.unpack(BCF_UN_INFO)}
+        let n_info = rec.n_info() as usize;
+        if n_info > 0 {
+            let p = rec.d.info;
+            assert!(!p.is_null());
+            unsafe { std::slice::from_raw_parts(p, n_info) }
+               .iter().find(|i| i.key == (self.tag_id as c_int))
+               .and_then(|i| {
+                   NonNull::new(i.vptr).map(|p| {
+                       assert!(i.len > 0 && i.type_size() > 0, "BCF vector length or size is zero!");
+                       let (n, size) = if i.vtype == BCF_BT_CHAR {
+                           (1, i.len as usize)
+                       } else {
+                           (i.len as usize, i.type_size())
+                       };
+                       BcfValIter{inner: BcfGenIter{p, n, size, phantom: PhantomData}, missing: false}
+                   })})
+
+        } else { None }
     }
 
     pub fn get_fmt(&self, rec: &'a mut BcfRec) -> Option<BcfVecIter<'a, T>> {
+        assert_eq!(self.tag_hl, BcfHeaderLine::Fmt, "Wrong tag type - expected Format tag");
         if (rec.unpacked as usize) & BCF_UN_FMT == 0 { rec.unpack(BCF_UN_FLT)}
         let n_fmt = rec.n_fmt() as usize;
-        println!("n_fmt = {}", n_fmt);
         if n_fmt > 0 {
             let p = rec.d.fmt;
             assert!(!p.is_null());
-            let v = unsafe { std::slice::from_raw_parts(p, n_fmt) };
-            let fmt = v.iter().find(|f| f.id == (self.tag_id as c_int));
-            fmt.and_then(|f| {
-                NonNull::new(f.p).map(|p| (p, f.n, f.size, f.type_size(), f.vtype))
-            })
-               .map(|(p, n, size, type_size, vtype)| {
-                   assert!(n > 0 && size > 0 && type_size > 0, "BCF vector length or size is zero!");
-                   println!("n: {}, size: {}, type_size: {}", n, size, type_size);
-                   let (n, type_size) = if vtype == BCF_BT_CHAR {
-                       (1, n as usize)
-                   } else {
-                       (n as usize, type_size as usize)
-                   };
-                   BcfVecIter{ inner: BcfGenIter{p, n, size: type_size, phantom: PhantomData}, size: size as usize, n_vec: self.n_samples }
-               })
+            unsafe { std::slice::from_raw_parts(p, n_fmt) }
+               .iter().find(|f| f.id == (self.tag_id as c_int))
+               .and_then(|f| {
+                   NonNull::new(f.p).map(|p| {
+                       assert!(f.n > 0 && f.size > 0 && f.type_size() > 0, "BCF vector length or size is zero!");
+                       let (n, type_size) = if f.vtype == BCF_BT_CHAR {
+                           (1, f.n as usize)
+                       } else {
+                           (f.n as usize, f.type_size())
+                       };
+                       BcfVecIter{ inner: BcfGenIter{p, n, size: type_size, phantom: PhantomData}, size: f.size as usize, n_vec: self.n_samples }
+                   })})
+
         } else { None }
     }
 }

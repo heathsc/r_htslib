@@ -391,9 +391,29 @@ pub const BCF_MIN_BT_INT16: i32 = -32760; /* INT16_MIN + 8 */
 pub const BCF_MIN_BT_INT32: i32 = -2147483640; /* INT32_MIN + 8 */
 
 #[repr(C)]
-struct bcf_info_t {
-   _unused: [u8; 0],
+pub(super) union info_val {
+   pub(super) i: i64,
+   pub(super) f: f32,
 }
+
+#[repr(C)]
+#[derive(BitfieldStruct)]
+pub(super) struct bcf_info_t {
+   pub(super) key: c_int,
+   pub(super) vtype: c_int,
+   pub(super) v1: info_val,
+   pub(super) vptr: *mut u8,
+   pub(super) vptr_len: u32,
+   #[bitfield(name = "vptr_off", ty = "u32", bits = "0..=30")]
+   #[bitfield(name = "vptr_free", ty = "u8", bits = "31..=31")]
+   pub(super) bitfield1: [u8; 4],
+   pub(super) len: c_int,
+}
+
+impl bcf_info_t {
+   pub(super) fn type_size(&self) -> usize { type_size(self.vtype ) }
+}
+
 #[repr(C)]
 #[derive(BitfieldStruct)]
 pub(super) struct bcf_fmt_t {
@@ -408,16 +428,18 @@ pub(super) struct bcf_fmt_t {
    pub(super) bitfield1: [u8; 4],
 }
 
-impl bcf_fmt_t {
-   pub(super) fn type_size(&self) -> usize {
-      match self.vtype {
-         BCF_BT_INT8 | BCF_BT_CHAR => 1,
-         BCF_BT_INT16 => 2,
-         BCF_BT_INT32 | BCF_BT_FLOAT => 4,
-         BCF_BT_INT64 => 8,
-         _ => 0,
-      }
+fn type_size(vtype: c_int) -> usize {
+   match vtype {
+      BCF_BT_INT8 | BCF_BT_CHAR => 1,
+      BCF_BT_INT16 => 2,
+      BCF_BT_INT32 | BCF_BT_FLOAT => 4,
+      BCF_BT_INT64 => 8,
+      _ => 0,
    }
+}
+
+impl bcf_fmt_t {
+   pub(super) fn type_size(&self) -> usize { type_size(self.vtype ) }
 }
 
 #[repr(C)]
@@ -438,7 +460,7 @@ pub(super) struct bcf_dec_t {
    id: *mut c_char,
    als: *mut c_char,
    alleles: *mut *mut c_char,
-   info: *mut bcf_info_t,
+   pub(super) info: *mut bcf_info_t,
    pub(super) fmt: *mut bcf_fmt_t,
    var: *mut bcf_variant_t,
    n_var: c_int,
