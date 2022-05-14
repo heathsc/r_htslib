@@ -38,11 +38,13 @@ pub const BCF_UN_ALL: usize = BCF_UN_SHR|BCF_UN_FMT; // everything
 pub const BCF_INT8_MISSING: i8 = i8::MIN;
 pub const BCF_INT16_MISSING: i16 = i16::MIN;
 pub const BCF_INT32_MISSING: i32 = i32::MIN;
+pub const BCF_INT64_MISSING: i64 = i64::MIN;
 pub const BCF_FLOAT_MISSING: u32 = 0x7f800001;
 
 pub const BCF_INT8_VECTOR_END: i8 = i8::MIN + 1;
 pub const BCF_INT16_VECTOR_END: i16 = i16::MIN + 1;
 pub const BCF_INT32_VECTOR_END: i32 = i32::MIN + 1;
+pub const BCF_INT64_VECTOR_END: i64 = i64::MIN + 1;
 pub const BCF_FLOAT_VECTOR_END: u32 = 0x7f800002;
 
 macro_rules! mk_try_from {
@@ -225,6 +227,51 @@ impl <'a>BcfHeaderVar<'a> for BcfHdrInt {
    fn try_parse(p: &'a [u8]) -> Result<BcfOpt<Self::Item>, &'static str> { try_parse_int(p) }
 }
 
+pub struct BcfHdrLong(i64);
+impl <'a>BcfHeaderVar<'a> for BcfHdrLong {
+   type Item = i64;
+
+   fn hdr_type() -> BcfHeaderType { BcfHeaderType::Long }
+
+   fn try_parse(p: &'a [u8]) -> Result<BcfOpt<Self::Item>, &'static str> {
+      match p.len() {
+         1 => {
+            let x = i8::from_le_bytes([p[0]]);
+            Ok(match x {
+               BCF_INT8_MISSING => BcfOpt::Missing,
+               BCF_INT8_VECTOR_END => BcfOpt::EndOfVec,
+               _ => BcfOpt::Some(x as i64),
+            })
+         },
+         2 => {
+            let x = i16::from_le_bytes([p[0], p[1]]);
+            Ok(match x {
+               BCF_INT16_MISSING => BcfOpt::Missing,
+               BCF_INT16_VECTOR_END => BcfOpt::EndOfVec,
+               _ => BcfOpt::Some(x as i64),
+            })
+         },
+         4 => {
+            let x = i32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+            Ok(match x {
+               BCF_INT32_MISSING => BcfOpt::Missing,
+               BCF_INT32_VECTOR_END => BcfOpt::EndOfVec,
+               _ => BcfOpt::Some(x as i64),
+            })
+         },
+         8 => {
+            let x = i64::from_le_bytes([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]]);
+            Ok(match x {
+               BCF_INT64_MISSING => BcfOpt::Missing,
+               BCF_INT64_VECTOR_END => BcfOpt::EndOfVec,
+               _ => BcfOpt::Some(x),
+            })
+         },
+         _ => Err("Illegal integer width"),
+      }
+   }
+}
+
 #[repr(C)]
 pub struct bcf_hrec_t {
    _type: c_int,
@@ -342,27 +389,6 @@ pub const MAX_BT_INT32: i32 = 0x7fffffff; /* INT32_MAX */
 pub const BCF_MIN_BT_INT8: i32 = -120; /* INT8_MIN  + 8 */
 pub const BCF_MIN_BT_INT16: i32 = -32760; /* INT16_MIN + 8 */
 pub const BCF_MIN_BT_INT32: i32 = -2147483640; /* INT32_MIN + 8 */
-
-#[allow(non_upper_case_globals)]
-pub const bcf_int8_vector_end: i32 = -127; /* INT8_MIN  + 1 */
-#[allow(non_upper_case_globals)]
-pub const bcf_int16_vector_end: i32 = -32767; /* INT16_MIN + 1 */
-#[allow(non_upper_case_globals)]
-pub const bcf_int32_vector_end: i32 = -2147483647; /* INT32_MIN + 1 */
-#[allow(non_upper_case_globals)]
-pub const bcf_int64_vector_end: i64 = -9223372036854775807; /* INT64_MIN + 1 */
-#[allow(non_upper_case_globals)]
-pub const bcf_str_vector_end: usize = 0;
-#[allow(non_upper_case_globals)]
-pub const bcf_int8_missing: i32 = -128; /* INT8_MIN  */
-#[allow(non_upper_case_globals)]
-pub const bcf_int16_missing: i32 = -32767 - 1; /* INT16_MIN */
-#[allow(non_upper_case_globals)]
-pub const bcf_int32_missing: i32 = -2147483647 - 1; /* INT32_MIN */
-#[allow(non_upper_case_globals)]
-pub const bcf_int64_missing: i64 = -9223372036854775807 - 1; /* INT64_MIN */
-#[allow(non_upper_case_globals)]
-pub const bcf_str_missing: usize = 0x07;
 
 #[repr(C)]
 struct bcf_info_t {

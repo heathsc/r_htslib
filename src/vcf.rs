@@ -268,7 +268,7 @@ impl BcfRec {
     pub fn qual(&self) -> f32 { self.as_ref().qual }
     pub fn n_sample(&self) -> u32 { self.as_ref().n_sample() }
 
-    pub fn format(&mut self, hdr: &HtsHdr, s: &mut kstring_t) -> io::Result<()>{
+    pub fn format(&mut self, hdr: &HtsHdr, s: &mut kstring_t) -> io::Result<()> {
         s.clear();
         if let HtsHdr::Vcf(h) = hdr {
             let e = self.as_mut().format(h, s);
@@ -281,6 +281,9 @@ impl BcfRec {
             Err(hts_err("Wrong header type for VCF format".to_string()))
         }
     }
+
+    pub fn get_fmt<'a, T: BcfHeaderVar<'a>>( &'a mut self , htag: & BcfHdrTag<'a, T>) -> Option<BcfVecIter<'a, T>> { htag.get_fmt(self) }
+
 }
 
 impl Drop for BcfRec {
@@ -290,7 +293,6 @@ impl Drop for BcfRec {
 }
 
 pub struct BcfHdrTag<'a, T: BcfHeaderVar<'a>> {
-    tag: String,
     tag_hl: BcfHeaderLine,
     tag_id: isize,
     n_samples: usize,
@@ -319,11 +321,10 @@ impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
         } else if ty != T::hdr_type() {
             return Err(hts_err(format!("Incorrect variable type for header tag {}", tag)))
         }
-        let tag = tag.to_owned();
         let n_samples = hdr.n_samples();
         assert!(n_samples >= 0);
 
-        Ok(Self{tag, tag_hl, tag_id, n_samples: n_samples as usize, phantom: PhantomData})
+        Ok(Self{tag_hl, tag_id, n_samples: n_samples as usize, phantom: PhantomData})
     }
 
     pub fn fmt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Fmt) }

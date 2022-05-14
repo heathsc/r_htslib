@@ -114,10 +114,10 @@ impl kstring_t {
         }
     }
     pub fn bcf_enc_int1(&mut self, x: c_int) -> bool {
-        if x == bcf_int32_vector_end {
-            self.bcf_enc_size(1, BCF_BT_INT8 as u8) || self.putc(bcf_int8_vector_end as c_char)
-        } else if x == bcf_int32_missing {
-            self.bcf_enc_size(1, BCF_BT_INT8 as u8) || self.putc(bcf_int8_missing as c_char)
+        if x == BCF_INT32_VECTOR_END {
+            self.bcf_enc_size(1, BCF_BT_INT8 as u8) || self.putc(BCF_INT8_VECTOR_END as c_char)
+        } else if x == BCF_INT32_MISSING {
+            self.bcf_enc_size(1, BCF_BT_INT8 as u8) || self.putc(BCF_INT8_MISSING as c_char)
         } else if x <= BCF_MAX_BT_INT8 && x >= BCF_MIN_BT_INT8 {
             self.bcf_enc_size(1, BCF_BT_INT8 as u8) || self.putc(x as c_char)
         } else if x <= BCF_MAX_BT_INT16 && x >= BCF_MIN_BT_INT16 {
