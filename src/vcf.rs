@@ -1,9 +1,12 @@
-use std::io;
-use std::marker::PhantomData;
-use std::ptr::NonNull;
-use std::ops::{Deref, DerefMut};
-use std::convert::{AsRef, AsMut, TryFrom};
-use std::ffi::CStr;
+use std::{
+    io,
+    marker::PhantomData,
+    ptr::NonNull,
+    ops::{Deref, DerefMut},
+    convert::{AsRef, AsMut, TryFrom},
+    ffi::CStr,
+    collections::HashMap,
+};
 
 pub mod lib;
 pub use lib::*;
@@ -131,11 +134,13 @@ impl VcfHeader {
         }
     }
 
-    pub fn fmt<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::fmt(self, tag) }
+    pub fn fmt<'a, T: BcfHeaderVar<'a, T>>(&self, tag: &str) -> io::Result<BcfTag<T>> { BcfTag::fmt(self, tag) }
 
-    pub fn info<'a, T: BcfHeaderVar<'a>>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { BcfHdrTag::info(self, tag) }
+    pub fn info<'a, T: BcfHeaderVar<'a, T>>(&self, tag: &str) -> io::Result<BcfTag<T>> { BcfTag::info(self, tag) }
 
-    pub fn flt<'a>(&self, tag: &str) -> io::Result<BcfHdrTag<'a, BcfHdrFlag>> { BcfHdrTag::flt(self, tag) }
+    pub fn flt(&self, tag: &str) -> io::Result<BcfTag<BcfFlag>> { BcfTag::flt(self, tag) }
+
+    pub fn flt_set(&self, tags: &[&str]) -> io::Result<FilterSet> { FilterSet::new(self, tags) }
 }
 
 impl Clone for VcfHeader {
@@ -265,6 +270,13 @@ impl BcfRec {
     pub fn n_allele(&self) -> u16 { self.as_ref().n_allele() }
     pub fn n_info(&self) -> u16 { self.as_ref().n_info() }
     pub fn n_fmt(&self) -> u8 { self.as_ref().n_fmt() }
+    pub fn n_flt(&mut self) -> c_int {
+        if (self.unpacked as usize) & BCF_UN_FLT == 0 { self.unpack(BCF_UN_FLT)}
+        self.d.n_flt
+    }
+
+    pub fn passed(&mut self) -> bool { self.n_flt() > 0 }
+
     pub fn qual(&self) -> f32 { self.as_ref().qual }
     pub fn n_sample(&self) -> u32 { self.as_ref().n_sample() }
 
@@ -282,11 +294,15 @@ impl BcfRec {
         }
     }
 
-    pub fn get_fmt<'a, T: BcfHeaderVar<'a>>( &'a mut self , htag: & BcfHdrTag<'a, T>) -> Option<BcfVecIter<'a, T>> { htag.get_fmt(self) }
+    pub fn get_fmt<'a, T: BcfHeaderVar<'a, T>>(&'a mut self, htag: &BcfTag<T>) -> Option<BcfVecIter<'a, T>> { htag.get_fmt(self) }
 
-    pub fn get_info<'a, T: BcfHeaderVar<'a>>( &'a mut self , htag: & BcfHdrTag<'a, T>) -> Option<BcfValIter<'a, T>> { htag.get_info(self) }
+    pub fn get_info<'a, T: BcfHeaderVar<'a, T>>(&'a mut self, htag: &BcfTag<T>) -> Option<BcfValIter<'a, T>> { htag.get_info(self) }
 
-    pub fn get_flt<'a>( &'a mut self , htag: & BcfHdrTag<'a, BcfHdrFlag>) -> bool { htag.get_flt(self) }
+    pub fn get_flt(&mut self, htag: &BcfTag<BcfFlag>) -> bool { htag.get_flt(self) }
+
+    pub fn flt_set_any(&mut self, fset: &FilterSet) -> bool { fset.any(self) }
+
+    pub fn flt_set_all(&mut self, fset: &FilterSet) -> bool { fset.all(self) }
 
 }
 
@@ -296,25 +312,84 @@ impl Drop for BcfRec {
     }
 }
 
-pub struct BcfHdrTag<'a, T: BcfHeaderVar<'a>> {
+pub struct FilterSet {
+    hset: HashMap<c_int, u64>,
+    mask: u64,
+}
+
+impl FilterSet {
+    pub fn new(hdr: &VcfHeader, tags: &[&str]) -> io::Result<Self> {
+        if tags.len() > 64 {
+            return Err(hts_err("Too many tags: Maximum tags in a FilterSet is 64".to_string()))
+        }
+        let tag_ids: Vec<_> = tags.iter().enumerate().filter_map(|(ix, s)| {
+             hdr.id2int(BCF_DT_ID as usize, s)
+               .and_then(|id| {
+                   let info = unsafe {(*(*hdr.as_ref().id[BCF_DT_ID as usize].add(id)).val).info[BcfHeaderLine::Flt as usize] };
+                   if (info & 0xf) == 0xf { None } else { Some((ix, id)) }
+               })
+        }).collect();
+        if tag_ids.len() < tags.len() {
+            let mut missing_tags = Vec::with_capacity(tags.len() - tag_ids.len());
+            let mut ix = 0;
+            for (i, _) in tag_ids.iter() {
+                for s in &tags[ix..*i] { missing_tags.push(*s)}
+                ix = *i + 1;
+            }
+            for s in &tags[ix..] { missing_tags.push(*s)}
+            Err(hts_err(format!("Not all filter tags were found in header.  Missing tags: {:?}", missing_tags)))
+        } else {
+            let hset: HashMap<c_int, u64> = tag_ids.iter().copied().enumerate().map(|(ix, (_, i))| (i as c_int, 1u64 << ix)).collect();
+            let mask = (1u64 << tags.len()) - 1;
+            Ok(Self{hset, mask})
+        }
+    }
+
+    // Check if any of the filters in FilterSet are present
+    pub fn any(&self, rec: &mut BcfRec) -> bool {
+        if (rec.unpacked as usize) & BCF_UN_FLT == 0 { rec.unpack(BCF_UN_FLT)}
+        assert!(rec.d.n_flt >= 0);
+        let n_flt = rec.d.n_flt as usize;
+        if n_flt == 0 && self.hset.contains_key(&0) { true }
+        else {
+            let p = rec.d.flt;
+            assert!(!p.is_null());
+            unsafe { std::slice::from_raw_parts(p, n_flt) }
+               .iter().any(|i| self.hset.contains_key(i))
+        }
+    }
+
+    // Check if all of the filters in FilterSet are present
+    pub fn all(&self, rec: &mut BcfRec) -> bool {
+        if (rec.unpacked as usize) & BCF_UN_FLT == 0 { rec.unpack(BCF_UN_FLT)}
+        assert!(rec.d.n_flt >= 0);
+        let n_flt = rec.d.n_flt as usize;
+        if n_flt == 0 { self.mask == 1 }
+        else {
+            let p = rec.d.flt;
+            assert!(!p.is_null());
+            self.mask == unsafe { std::slice::from_raw_parts(p, n_flt) }
+               .iter().fold(0, |m, i| if let Some(x) = self.hset.get(i) { m | x } else { m })
+        }
+    }
+}
+
+pub struct BcfTag<T> {
     tag_hl: BcfHeaderLine,
     tag_id: isize,
     n_samples: usize,
-    phantom: PhantomData<&'a T>,
+    phantom: PhantomData<T>,
 }
 
-impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
-    pub fn new(hdr: &VcfHeader, mut tag: &str, tag_hl: BcfHeaderLine) -> io::Result<BcfHdrTag<'a, T>> {
+impl <'a, T: BcfHeaderVar<'a, T>> BcfTag<T> {
+    pub fn new(hdr: &VcfHeader, mut tag: &str, tag_hl: BcfHeaderLine) -> io::Result<BcfTag<T>> {
         if tag_hl > BcfHeaderLine::Fmt {
             return Err(hts_err("Bad Header line type used for BcfHeaderVar".to_string()))
         }
         if tag_hl == BcfHeaderLine::Flt && tag == "." { tag = "PASS" }
         let hlt = tag_hl as usize;
-        let ctag = get_cstr(tag);
-        let tag_id = match unsafe { bcf_hdr_id2int(hdr.as_ref(), BCF_DT_ID as c_int, ctag.as_ptr())} {
-            c_int::MIN..=-1 => return Err(hts_err(format!("Unknown header tag {}", tag))),
-            id => id as isize,
-        };
+        let tag_id = hdr.id2int(BCF_DT_ID as usize, tag)
+           .ok_or_else(|| hts_err(format!("Unknown header tag {}", tag)))? as isize;
         let info = unsafe {(*(*hdr.as_ref().id[BCF_DT_ID as usize].offset(tag_id)).val).info[hlt] };
         if (info & 0xf) == 0xf {
             return Err(hts_err(format!("Unknown header tag {} of type {:?}", tag, tag_hl)))
@@ -334,11 +409,11 @@ impl <'a, T: BcfHeaderVar<'a>>BcfHdrTag<'a, T> {
         Ok(Self{tag_hl, tag_id, n_samples: n_samples as usize, phantom: PhantomData})
     }
 
-    pub fn fmt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Fmt) }
+    pub fn fmt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfTag<T>> { Self::new(hdr, tag, BcfHeaderLine::Fmt) }
 
-    pub fn info(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T>> { Self::new(hdr, tag, BcfHeaderLine::Info) }
+    pub fn info(hdr: &VcfHeader, tag: &str) -> io::Result<BcfTag<T>> { Self::new(hdr, tag, BcfHeaderLine::Info) }
 
-    pub fn flt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfHdrTag<'a, T >> { Self::new(hdr, tag, BcfHeaderLine::Flt) }
+    pub fn flt(hdr: &VcfHeader, tag: &str) -> io::Result<BcfTag<T>> { Self::new(hdr, tag, BcfHeaderLine::Flt) }
 
     pub fn get_info(&self, rec: &'a mut BcfRec) -> Option<BcfValIter<'a, T>> {
         assert_eq!(self.tag_hl, BcfHeaderLine::Info, "Wrong tag type - expected Info tag");
@@ -415,7 +490,7 @@ pub struct BcfVecIter<'a, T> {
 }
 
 impl <'a, T>Iterator for BcfVecIter<'a, T>
-where T: BcfHeaderVar<'a>,
+where T: BcfHeaderVar<'a, T>,
 {
     type Item = BcfValIter<'a, T>;
 
@@ -424,7 +499,7 @@ where T: BcfHeaderVar<'a>,
             None
         } else {
             let iter = BcfValIter{ inner: BcfGenIter{p: self.inner.p, n: self.inner.n, size: self.inner.size, phantom: PhantomData}, missing: false};
-            self.inner.p = unsafe { NonNull::new_unchecked(self.inner.p.as_ptr().offset(self.size as isize)) };
+            self.inner.p = unsafe { NonNull::new_unchecked(self.inner.p.as_ptr().add(self.size)) };
             self.n_vec -= 1;
             Some(iter)
         }
@@ -437,7 +512,7 @@ pub struct BcfValIter<'a, T> {
 }
 
 impl <'a, T>Iterator for BcfValIter<'a, T>
-    where T: BcfHeaderVar<'a>,
+    where T: BcfHeaderVar<'a, T>,
 {
     type Item = Option<T::Item>;
 
@@ -457,7 +532,7 @@ impl <'a, T>Iterator for BcfValIter<'a, T>
                             None
                         },
                     };
-                    self.inner.p = unsafe { NonNull::new_unchecked(self.inner.p.as_ptr().offset(self.inner.size as isize)) };
+                    self.inner.p = unsafe { NonNull::new_unchecked(self.inner.p.as_ptr().add(self.inner.size)) };
                     x
                 }
             )

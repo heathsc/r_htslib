@@ -168,16 +168,16 @@ fn try_parse_int(p: &[u8]) -> Result<BcfOpt<i32>, &'static str> {
    }
 }
 
-pub trait BcfHeaderVar<'a> {
+pub trait BcfHeaderVar<'a, T> {
    type Item;
 
    fn hdr_type() -> BcfHeaderType;
 
-   fn try_parse(p: &'a[u8]) -> Result<BcfOpt<Self::Item>, &'static str>;
+   fn try_parse(p: &'a [u8]) -> Result<BcfOpt<Self::Item>, &'static str>;
 }
 
-pub struct BcfHdrFlag(bool);
-impl <'a>BcfHeaderVar<'a> for BcfHdrFlag {
+pub struct BcfFlag(bool);
+impl <'a, T>BcfHeaderVar<'a, T> for BcfFlag {
    type Item = bool;
 
    fn hdr_type() -> BcfHeaderType { BcfHeaderType::Flag }
@@ -187,8 +187,8 @@ impl <'a>BcfHeaderVar<'a> for BcfHdrFlag {
    }
 }
 
-pub struct BcfHdrFloat(f32);
-impl <'a>BcfHeaderVar<'a> for BcfHdrFloat {
+pub struct BcfFloat(f32);
+impl <'a, T>BcfHeaderVar<'a, T> for BcfFloat {
    type Item = f32;
 
    fn hdr_type() -> BcfHeaderType { BcfHeaderType::Real }
@@ -205,8 +205,8 @@ impl <'a>BcfHeaderVar<'a> for BcfHdrFloat {
    }
 }
 
-pub struct BcfHdrStr<'a>(&'a str);
-impl <'a>BcfHeaderVar<'a> for BcfHdrStr<'a> {
+pub struct BcfStr<'a>(&'a str);
+impl <'a, T>BcfHeaderVar<'a, T> for BcfStr<'a> {
    type Item = &'a str;
 
    fn hdr_type() -> BcfHeaderType { BcfHeaderType::Str }
@@ -221,8 +221,8 @@ impl <'a>BcfHeaderVar<'a> for BcfHdrStr<'a> {
    }
 }
 
-pub struct BcfHdrInt(i32);
-impl <'a>BcfHeaderVar<'a> for BcfHdrInt {
+pub struct BcfInt(i32);
+impl <'a, T>BcfHeaderVar<'a, T> for BcfInt {
    type Item = i32;
 
    fn hdr_type() -> BcfHeaderType { BcfHeaderType::Int }
@@ -230,8 +230,8 @@ impl <'a>BcfHeaderVar<'a> for BcfHdrInt {
    fn try_parse(p: &'a [u8]) -> Result<BcfOpt<Self::Item>, &'static str> { try_parse_int(p) }
 }
 
-pub struct BcfHdrLong(i64);
-impl <'a>BcfHeaderVar<'a> for BcfHdrLong {
+pub struct BcfLong(i64);
+impl <'a, T>BcfHeaderVar<'a, T> for BcfLong {
    type Item = i64;
 
    fn hdr_type() -> BcfHeaderType { BcfHeaderType::Long }
