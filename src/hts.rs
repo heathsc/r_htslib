@@ -188,11 +188,11 @@ impl Hts {
     pub fn itr_querys(&mut self, reg: &CStr) -> io::Result<HtsItr> {
         match reg.to_bytes() {
             [b'.'] => {
-                let region = Region{tid: HTS_IDX_START, begin: 0, end: 0};
+                let region = Region::make(HTS_IDX_START, 0, 0);
                 self.itr_query(&region)
             },
             [b'*'] => {
-                let region = Region{tid: HTS_IDX_NOCOOR, begin: 0, end: 0};
+                let region = Region::make(HTS_IDX_NOCOOR, 0, 0);
                 self.itr_query(&region)
             },
             _ => {
@@ -234,9 +234,10 @@ impl Hts {
     pub fn make_region_list<S: AsRef<str>>(&mut self, regs: &[S]) -> RegionList {
         let mut rlist = RegionList::new();
         if let Ok((get_id, hdr)) = self.get_parse_data() {
-            for reg in regs {
+            for (ix, reg) in regs.iter().enumerate() {
                 let r = get_cstr(reg);
-                if let Ok(region) = Self::_parse_region(get_id, hdr, r.as_ref()) {
+                if let Ok(mut region) = Self::_parse_region(get_id, hdr, r.as_ref()) {
+                    region.set_idx(Some(ix as u32));
                     rlist.add_region(region)
                 }
             }
@@ -468,7 +469,7 @@ impl HtsFormat {
     }
 }
 
-pub struct HtsItr{
+pub struct HtsItr {
     inner: NonNull<hts_itr_t>,
     phantom: PhantomData<hts_itr_t>,
 }
@@ -538,6 +539,7 @@ pub struct HtsItrReader<'a, 'b, T>
     hts: &'a mut Hts,
     region_itr: std::slice::Iter<'b, Region>,
     itr: Option<HtsItr>,
+    region: Option<&'b Region>,
     _phantom: PhantomData<T>,
 }
 
@@ -549,6 +551,7 @@ impl <'a, 'b, T> HtsItrReader<'a, 'b, T> {
             hts,
             region_itr,
             itr: None,
+            region: None,
             _phantom: PhantomData
         }
     }
@@ -559,19 +562,22 @@ impl <'a, 'b, T: HtsRead> HtsItrReader<'a, 'b, T> {
         loop {
             if self.itr.is_none() {
                 if let Some(reg) = self.region_itr.next() {
-                    self.itr = self.hts.itr_query(&reg).ok();
+                    self.itr = Some(self.hts.itr_query(reg)?);
+                    self.region = Some(reg)
                 } else {
                     break
                 }
             }
-            if let Some(itr) = self.itr.as_mut() {
-                let r = rec.read_itr(self.hts, itr)?;
-                if r { return Ok(true) }
-                self.itr = None;
-            } else { break }
+            let itr= self.itr.as_mut().unwrap();
+            let r = rec.read_itr(self.hts, itr)?;
+            if r { return Ok(true) }
+            self.itr = None;
+            self.region = None;
         }
         Ok(false)
     }
+
+    pub fn current_region(&self) -> Option<&Region> { self.region }
 
     pub fn header(&self) -> Option<&HtsHdr> {
         self.hts.header()
@@ -580,13 +586,28 @@ impl <'a, 'b, T: HtsRead> HtsItrReader<'a, 'b, T> {
 
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct Region {
-    pub tid: c_int,
-    pub begin: HtsPos,
-    pub end: HtsPos,
+    tid: c_int,
+    begin: HtsPos,
+    end: HtsPos,
+    idx: Option<u32>,
 }
 
 impl Region {
     pub fn new() -> Self { Self::default() }
+
+    pub fn make(tid: c_int, begin: HtsPos, end: HtsPos) -> Self {
+        Self { tid, begin, end, idx: None }
+    }
+
+    pub fn set_idx(&mut self, idx: Option<u32>) { self.idx = idx }
+
+    pub fn idx(&self) -> Option<u32> { self.idx }
+
+    pub fn tid(&self) -> c_int { self.tid }
+
+    pub fn begin(&self) -> HtsPos { self.begin }
+
+    pub fn end(&self) -> HtsPos { self.end }
 }
 
 impl Ord for Region {
@@ -641,6 +662,7 @@ impl RegionList {
                 nlist.push(prev);
                 self.regions = nlist;
             }
+            self.regions.iter_mut().for_each(|r| r.set_idx(None));
         }
     }
 }
