@@ -182,7 +182,7 @@ impl HtsRead for TbxRec {
             )} {
                0..=c_int::MAX => Ok(true),
                -1 => Ok(false),
-               _ => Err(hts_err("Error reading SAM/BAM record".to_string())),
+               _ => Err(hts_err("Error reading Tabix record".to_string())),
             }
          } else {
             Err(hts_err(format!("Appropriate header not found for file {}", fp.name())))
@@ -205,7 +205,7 @@ impl HtsRead for TbxRec {
             )} {
                0..=c_int::MAX => Ok(true),
                -1 => Ok(false),
-               _ => Err(hts_err("Error reading SAM/BAM record".to_string())),
+               _ => Err(hts_err("Error reading Tabix record".to_string())),
             }
          } else {
             Err(hts_err(format!("Appropriate header not found for file {}", fp.name())))
@@ -302,12 +302,6 @@ impl Tbx {
          Some(p) => Ok(Tbx{inner: p, phantom: PhantomData}),
       }
    }
-}
-
-pub enum TbxReadResult {
-   Ok,
-   EOF,
-   Error,
 }
 
 pub (crate) unsafe extern "C" fn tbx_read_itr(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int {
