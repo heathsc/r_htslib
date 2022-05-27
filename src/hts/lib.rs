@@ -1,5 +1,5 @@
 use c2rust_bitfields::BitfieldStruct;
-use libc::{c_char, c_int, c_short, c_uchar};
+use libc::{c_char, c_int, c_short, c_uchar, c_uint, off_t, size_t, ssize_t};
 use std::ffi::{c_void};
 use std::io;
 use std::marker::PhantomData;
@@ -63,6 +63,13 @@ pub struct prehtsFile {
 }
 
 #[repr(C)]
+pub union FileType {
+   pub(crate) bgzf: *mut BGZF,
+   pub(crate) cram_fd: *mut cram_fd,
+   pub(crate) hfile: *mut hfile,
+}
+
+#[repr(C)]
 #[derive(BitfieldStruct)]
 pub struct htsFile {
    #[bitfield(name = "is_bin", ty = "c_uchar", bits = "0..=0")]
@@ -76,7 +83,7 @@ pub struct htsFile {
    line: kstring_t,
    fn_: NonNull<c_char>,
    fn_aux: *mut c_char,
-   pub (crate) fp: *mut c_void,
+   pub (crate) fp: FileType,
    state: *mut c_void,
    format: htsFormat,
    idx: *mut hts_idx_t,
@@ -99,13 +106,13 @@ impl htsFile {
    }
 
    pub fn file_desc(&mut self) -> Option<HtsFileDesc> {
-      if self.is_bgzf() != 0 {
-         NonNull::new(self.fp as *mut BGZF).map(|p| HtsFileDesc::Bgzf(p))
+      unsafe { if self.is_bgzf() != 0 {
+         NonNull::new(self.fp.bgzf).map(|p| HtsFileDesc::Bgzf(p))
       } else if self.is_cram() != 0 {
-         NonNull::new(self.fp as *mut cram_fd).map(|p| HtsFileDesc::Cram(p))
+         NonNull::new(self.fp.cram_fd).map(|p| HtsFileDesc::Cram(p))
       } else {
-         NonNull::new(self.fp as *mut hfile).map(|p| HtsFileDesc::Hfile(p))
-      }
+         NonNull::new(self.fp.hfile).map(|p| HtsFileDesc::Hfile(p))
+      }}
    }
 
    pub (super) fn name_ptr(&self) -> *const c_char {
@@ -200,9 +207,28 @@ pub struct BGZF {
 pub struct cram_fd {
    _unused: [u8; 0],
 }
+
 #[repr(C)]
-pub struct hfile {
+pub struct hFile_backend {
    _unused: [u8; 0],
+}
+
+const UINT_LEN: usize = std::mem::size_of::<c_uint>();
+
+#[repr(C)]
+#[derive(BitfieldStruct)]
+pub struct hfile {
+   buffer: *mut c_char,
+   begin: *mut c_char,
+   end: *mut c_char,
+   limit: *mut c_char,
+   backend: *mut hFile_backend,
+   offset: off_t,
+   #[bitfield(name = "at_eof", ty = "c_uint", bits = "0..=0")]
+   #[bitfield(name = "mobile", ty = "c_uint", bits = "1..=1")]
+   #[bitfield(name = "readonly", ty = "c_uint", bits = "2..=2")]
+   bfield: [u8; UINT_LEN],
+   has_errno: c_int,
 }
 
 #[repr(C)]
@@ -311,6 +337,38 @@ extern "C" {
    pub(super) fn hts_opt_free(opts: *mut hts_opt);
    pub(super) fn hts_opt_add(opts: *mut *mut hts_opt, c_arg: *const c_char) -> c_int;
    pub(crate) fn bgzf_getline(fp: *mut BGZF, delim: c_int, str: *mut kstring_t) -> c_int;
+   pub fn bgzf_write(fp: *mut BGZF, data: *const c_void, len: size_t) -> ssize_t;
+   pub fn bgzf_flush(fp: *mut BGZF) -> c_int;
+   fn hfile_set_blksize(fp: *mut hfile, bufsize: size_t) -> c_int;
+   fn hwrite2(fp: *mut hfile, data: *const c_void, total: size_t, copied: size_t) -> ssize_t;
    pub(crate) fn hts_itr_multi_next(fp: *mut htsFile, itr: *mut hts_itr_t, r: *mut c_void) -> c_int;
    pub(crate) fn hts_itr_next(fp: *mut BGZF, itr: *mut hts_itr_t, r: *mut c_void, data: *mut c_void) -> c_int;
+}
+
+pub fn hwrite(fp: &mut hfile, data: NonNull<c_void>, nbytes: size_t) -> ssize_t {
+   let nbytes1 = nbytes as isize;
+   if fp.mobile() == 0 {
+      let n = unsafe { fp.limit.offset_from(fp.begin) };
+      if n < nbytes1 {
+         unsafe { hfile_set_blksize(fp, (fp.limit.offset_from(fp.buffer) + nbytes1) as size_t ); }
+         fp.end = fp.limit;
+      }
+   }
+   let n = unsafe { fp.limit.offset_from(fp.begin) };
+   if nbytes1 >= n && fp.begin == fp.buffer {
+      // Go straight to hwrite2 if the buffer is empty and the request won't fit
+      unsafe { hwrite2(fp, data.as_ptr(), nbytes, 0) }
+   } else {
+      let n = n.min(nbytes1) as size_t;
+      unsafe {
+         libc::memcpy(fp.begin as *mut c_void, data.as_ptr(), n);
+         fp.begin = fp.begin.offset(n as isize)
+      }
+      if n == nbytes {
+         n as ssize_t
+      } else {
+         unsafe {hwrite2(fp, data.as_ptr(), nbytes, n) }
+      }
+   }
+
 }

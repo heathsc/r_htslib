@@ -148,7 +148,7 @@ impl HtsRead for BamRec {
          unsafe { hts_itr_multi_next(fp.as_mut(), itr.as_mut(), self.as_mut() as *mut bam1_t as *mut c_void) }
       } else {
          let bgfp = if fp.as_ref().is_bgzf() != 0 {
-            fp.as_ref().fp as *mut BGZF
+            unsafe {fp.as_ref().fp.bgzf}
          } else {
             null_mut::<BGZF>()
          };

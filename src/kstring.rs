@@ -42,6 +42,8 @@ extern "C" {
 impl kstring_t {
     pub fn new() -> Self { Self::default() }
 
+    pub fn len(&self) -> size_t { self.l }
+
     pub fn clear(&mut self) { self.l = 0 }
 
     pub fn resize(&mut self, size: size_t) -> bool {
@@ -149,6 +151,8 @@ impl kstring_t {
     pub fn to_cstr(&self) -> Option<&CStr> {
         self.s.map(|s| unsafe { CStr::from_ptr(s.as_ptr())})
     }
+    pub fn as_ptr(&self) -> Option<NonNull<c_char>> { self.s }
+
     pub fn as_slice(&self, inc_zero: bool) -> Option<&[u8]> {
         self.s.map(|s| {
             let p = s.as_ptr() as *const u8;
