@@ -337,15 +337,16 @@ extern "C" {
    pub(super) fn hts_opt_free(opts: *mut hts_opt);
    pub(super) fn hts_opt_add(opts: *mut *mut hts_opt, c_arg: *const c_char) -> c_int;
    pub(crate) fn bgzf_getline(fp: *mut BGZF, delim: c_int, str: *mut kstring_t) -> c_int;
-   pub fn bgzf_write(fp: *mut BGZF, data: *const c_void, len: size_t) -> ssize_t;
-   pub fn bgzf_flush(fp: *mut BGZF) -> c_int;
+   pub(crate) fn bgzf_write(fp: *mut BGZF, data: *const c_void, len: size_t) -> ssize_t;
+   pub(crate) fn bgzf_flush(fp: *mut BGZF) -> c_int;
+   pub(crate) fn hflush(fp: &mut hfile) -> c_int;
    fn hfile_set_blksize(fp: *mut hfile, bufsize: size_t) -> c_int;
    fn hwrite2(fp: *mut hfile, data: *const c_void, total: size_t, copied: size_t) -> ssize_t;
    pub(crate) fn hts_itr_multi_next(fp: *mut htsFile, itr: *mut hts_itr_t, r: *mut c_void) -> c_int;
    pub(crate) fn hts_itr_next(fp: *mut BGZF, itr: *mut hts_itr_t, r: *mut c_void, data: *mut c_void) -> c_int;
 }
 
-pub fn hwrite(fp: &mut hfile, data: NonNull<c_void>, nbytes: size_t) -> ssize_t {
+pub fn hwrite(fp: &mut hfile, data: *const u8, nbytes: size_t) -> ssize_t {
    let nbytes1 = nbytes as isize;
    if fp.mobile() == 0 {
       let n = unsafe { fp.limit.offset_from(fp.begin) };
@@ -357,17 +358,17 @@ pub fn hwrite(fp: &mut hfile, data: NonNull<c_void>, nbytes: size_t) -> ssize_t 
    let n = unsafe { fp.limit.offset_from(fp.begin) };
    if nbytes1 >= n && fp.begin == fp.buffer {
       // Go straight to hwrite2 if the buffer is empty and the request won't fit
-      unsafe { hwrite2(fp, data.as_ptr(), nbytes, 0) }
+      unsafe { hwrite2(fp, data as *const c_void, nbytes, 0) }
    } else {
       let n = n.min(nbytes1) as size_t;
       unsafe {
-         libc::memcpy(fp.begin as *mut c_void, data.as_ptr(), n);
+         libc::memcpy(fp.begin as *mut c_void, data as *const c_void, n);
          fp.begin = fp.begin.offset(n as isize)
       }
       if n == nbytes {
          n as ssize_t
       } else {
-         unsafe {hwrite2(fp, data.as_ptr(), nbytes, n) }
+         unsafe {hwrite2(fp, data as *const c_void, nbytes, n) }
       }
    }
 

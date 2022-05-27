@@ -1,10 +1,10 @@
 pub mod lib;
 pub use lib::*;
 
-use libc::{c_void, c_int};
+use libc::{c_void, c_int, size_t};
 
 use std::{
-    io,
+    io:: {self, Write},
     marker::PhantomData,
     ptr::{null, NonNull},
     ops::{Deref, DerefMut},
@@ -250,6 +250,8 @@ impl Hts {
     pub fn reader<T>(&mut self) -> HtsReader<T> { HtsReader::new(self) }
 
     pub fn itr_reader<'a, 'b, T>(&'a mut self, regions: &'b [Region]) -> HtsItrReader<'a, 'b, T> { HtsItrReader::new(self, regions) }
+
+    pub fn writer(&mut self) -> io::Result<Writer> { Writer::new(&mut self.hts_file) }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -334,6 +336,8 @@ impl HtsFile {
             Err(hts_err(format!("Failed to set thread pool for file {}", self.name())))
         }
     }
+
+    pub fn writer(&mut self) -> io::Result<Writer> { Writer::new(self) }
 }
 
 #[derive(Debug, Clone)]
@@ -666,5 +670,55 @@ impl RegionList {
             }
             self.regions.iter_mut().for_each(|r| r.set_idx(None));
         }
+    }
+}
+
+pub enum WriterFd {
+    Bgzf(NonNull<BGZF>),
+    Hfile(NonNull<hfile>),
+}
+
+pub struct Writer<'a> {
+    fd: WriterFd,
+    phantom: PhantomData<&'a mut HtsFile>,
+}
+
+impl <'a>Writer<'a> {
+    pub fn new(htsfile: &'a mut HtsFile) -> io::Result<Self> {
+        if htsfile.is_write() == 0 {
+            Err(hts_err("Can not set up Writer for a read only file".to_string()))
+        } else {
+            match htsfile.file_desc() {
+                Some(HtsFileDesc::Hfile(fd)) => Ok(Self { fd: WriterFd::Hfile(fd), phantom: PhantomData }),
+                Some(HtsFileDesc::Bgzf(fd)) => Ok(Self { fd: WriterFd::Bgzf(fd), phantom: PhantomData }),
+                Some(_) => Err(hts_err("Bad file type for Writer".to_string())),
+                None => Err(hts_err("Null file descriptor for Writer".to_string())),
+            }
+        }
+    }
+}
+
+impl <'a> Write for Writer<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let i = unsafe {match self.fd {
+            WriterFd::Hfile(mut fd) => {
+                hwrite(fd.as_mut(), buf.as_ptr(), buf.len() as size_t)
+            },
+            WriterFd::Bgzf(mut fd) => {
+                bgzf_write(fd.as_mut(), buf.as_ptr() as *const c_void, buf.len() as size_t)
+            },
+        }};
+        if i < 0 {
+            Err(hts_err("Write error".to_string()))
+        } else {
+            Ok(i as usize)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if unsafe { match self.fd {
+            WriterFd::Hfile(mut fd) => hflush(fd.as_mut()),
+            WriterFd::Bgzf(mut fd) => bgzf_flush(fd.as_mut()),
+        }} == 0 { Ok(()) } else { Err(hts_err("flush returned error".to_string())) }
     }
 }
