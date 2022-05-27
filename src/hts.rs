@@ -72,7 +72,9 @@ impl Hts {
 
     pub fn tbx_mut(&mut self) -> Option<&mut Tbx> { self.tbx.as_mut() }
 
-    pub fn hts_file(&mut self) -> &mut HtsFile { &mut self.hts_file }
+    pub fn hts_file_mut(&mut self) -> &mut HtsFile { &mut self.hts_file }
+
+    pub fn hts_file(&self) -> &HtsFile { &self.hts_file }
 
     pub fn hts_file_and_header(&mut self) -> (&mut HtsFile, Option<&mut HtsHdr>) {
         (&mut self.hts_file, self.header.as_mut())

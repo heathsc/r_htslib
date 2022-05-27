@@ -143,7 +143,7 @@ impl HtsRead for BamRec {
    }
 
    fn read_itr(&mut self, hts: &mut Hts, itr: &mut HtsItr) -> io::Result<bool> {
-      let fp = hts.hts_file();
+      let fp = hts.hts_file_mut();
       let i = if itr.multi() != 0 {
          unsafe { hts_itr_multi_next(fp.as_mut(), itr.as_mut(), self.as_mut() as *mut bam1_t as *mut c_void) }
       } else {
