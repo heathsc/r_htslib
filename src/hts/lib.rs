@@ -338,6 +338,8 @@ extern "C" {
    pub(super) fn hts_opt_add(opts: *mut *mut hts_opt, c_arg: *const c_char) -> c_int;
    pub(crate) fn bgzf_getline(fp: *mut BGZF, delim: c_int, str: *mut kstring_t) -> c_int;
    pub(crate) fn bgzf_write(fp: *mut BGZF, data: *const c_void, len: size_t) -> ssize_t;
+   pub(crate) fn bgzf_mt(fp: *mut BGZF, n_threads: c_int, n_sub_blocks: c_int) -> c_int;
+//   pub(crate) fn bgzf_block_write(fp: *mut BGZF, data: *const c_void, len: size_t) -> ssize_t;
    pub(crate) fn bgzf_flush(fp: *mut BGZF) -> c_int;
    pub(crate) fn hflush(fp: &mut hfile) -> c_int;
    fn hfile_set_blksize(fp: *mut hfile, bufsize: size_t) -> c_int;

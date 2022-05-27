@@ -691,6 +691,12 @@ impl WriterFd {
             }
         }
     }
+
+    pub fn set_mt(&mut self, n_threads: usize, n_blocks: usize) {
+        if let Self::Bgzf(fd) = self {
+            unsafe { bgzf_mt(fd.as_mut(), n_threads as c_int, n_blocks as c_int ); }
+        }
+    }
 }
 
 impl Write for WriterFd {
@@ -727,6 +733,8 @@ impl <'a>Writer<'a> {
         let fd = WriterFd::from_htsfile(htsfile)?;
         Ok(Self{fd, phantom: PhantomData})
     }
+
+    pub fn set_mt(&mut self, n_threads: usize, n_blocks: usize) { self.fd.set_mt(n_threads,n_blocks) }
 }
 
 impl <'a> Write for Writer<'a> {
@@ -749,6 +757,9 @@ impl OwnedWriter {
     pub fn hts(&self) -> &Hts { &self.hts }
 
     pub fn hts_mut(&mut self) -> &mut Hts { &mut self.hts }
+
+    pub fn set_mt(&mut self, n_threads: usize, n_blocks: usize) { self.fd.set_mt(n_threads,n_blocks) }
+
 }
 
 impl Write for OwnedWriter {
