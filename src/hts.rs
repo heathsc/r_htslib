@@ -678,19 +678,14 @@ pub enum WriterFd {
     Hfile(NonNull<hfile>),
 }
 
-pub struct Writer<'a> {
-    fd: WriterFd,
-    phantom: PhantomData<&'a mut HtsFile>,
-}
-
-impl <'a>Writer<'a> {
-    pub fn new(htsfile: &'a mut HtsFile) -> io::Result<Self> {
+impl WriterFd {
+    fn from_htsfile(htsfile: &mut HtsFile) -> io::Result<Self> {
         if htsfile.is_write() == 0 {
             Err(hts_err("Can not set up Writer for a read only file".to_string()))
         } else {
             match htsfile.file_desc() {
-                Some(HtsFileDesc::Hfile(fd)) => Ok(Self { fd: WriterFd::Hfile(fd), phantom: PhantomData }),
-                Some(HtsFileDesc::Bgzf(fd)) => Ok(Self { fd: WriterFd::Bgzf(fd), phantom: PhantomData }),
+                Some(HtsFileDesc::Hfile(fd)) => Ok(WriterFd::Hfile(fd)),
+                Some(HtsFileDesc::Bgzf(fd)) => Ok(WriterFd::Bgzf(fd)),
                 Some(_) => Err(hts_err("Bad file type for Writer".to_string())),
                 None => Err(hts_err("Null file descriptor for Writer".to_string())),
             }
@@ -698,9 +693,9 @@ impl <'a>Writer<'a> {
     }
 }
 
-impl <'a> Write for Writer<'a> {
+impl Write for WriterFd {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let i = unsafe {match self.fd {
+        let i = unsafe {match self {
             WriterFd::Hfile(mut fd) => {
                 hwrite(fd.as_mut(), buf.as_ptr(), buf.len() as size_t)
             },
@@ -716,9 +711,47 @@ impl <'a> Write for Writer<'a> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if unsafe { match self.fd {
+        if unsafe { match self {
             WriterFd::Hfile(mut fd) => hflush(fd.as_mut()),
             WriterFd::Bgzf(mut fd) => bgzf_flush(fd.as_mut()),
         }} == 0 { Ok(()) } else { Err(hts_err("flush returned error".to_string())) }
     }
+}
+pub struct Writer<'a> {
+    fd: WriterFd,
+    phantom: PhantomData<&'a mut HtsFile>,
+}
+
+impl <'a>Writer<'a> {
+    pub fn new(htsfile: &'a mut HtsFile) -> io::Result<Self> {
+        let fd = WriterFd::from_htsfile(htsfile)?;
+        Ok(Self{fd, phantom: PhantomData})
+    }
+}
+
+impl <'a> Write for Writer<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.fd.write(buf) }
+    fn flush(&mut self) -> io::Result<()> { self.fd.flush() }
+}
+
+pub struct OwnedWriter {
+    hts: Hts,
+    fd: WriterFd,
+}
+
+impl OwnedWriter {
+    pub fn new(mut hts: Hts) -> io::Result<Self> {
+        let htsfile = hts.hts_file_mut();
+        let fd = WriterFd::from_htsfile(htsfile)?;
+        Ok(Self{hts, fd})
+    }
+
+    pub fn hts(&self) -> &Hts { &self.hts }
+
+    pub fn hts_mut(&mut self) -> &mut Hts { &mut self.hts }
+}
+
+impl Write for OwnedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.fd.write(buf) }
+    fn flush(&mut self) -> io::Result<()> { self.fd.flush() }
 }
