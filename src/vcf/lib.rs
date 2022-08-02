@@ -351,6 +351,21 @@ pub struct bcf_hdr_t {
 
 impl bcf_hdr_t {
    pub fn n_samples(&self) -> i32 { self.n[BCF_DT_SAMPLE as usize] }
+
+   pub fn n_ref(&self) -> i32 { self.n[BCF_DT_CTG as usize] }
+
+   pub fn id2len(&self, id: usize) -> usize {
+      if id > self.n_ref() as usize {
+         panic!("Invalid reference id {}", id)
+      }
+      unsafe {
+         let ptr = self.id[BCF_DT_CTG as usize];
+         assert!(!ptr.is_null(), "Invalid header struct");
+         ptr.add(id).as_ref().expect("invalid header struct")
+            .val.as_ref().expect("Invalid header struct")
+            .info[0] as usize
+      }
+   }
 }
 
 #[link(name = "hts")]

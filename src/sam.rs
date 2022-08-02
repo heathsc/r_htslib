@@ -87,6 +87,11 @@ impl SamHeader {
       let n = self.nref();
       (0..n).map(|i| self.tid2name(i)).collect()
    }
+
+   pub fn seq_lengths(&self) -> Vec<usize> {
+      let n = self.nref();
+      (0..n).map(|i| self.tid2len(i)).collect()
+   }
 }
 
 impl Clone for SamHeader {

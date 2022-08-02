@@ -68,6 +68,11 @@ impl Hts {
         else { Vec::new() }
     }
 
+    pub fn seq_lengths(&self) -> Vec<usize> {
+        if let Some(h) = self.header.as_ref() { h.seq_lengths() }
+        else { Vec::new() }
+    }
+
     pub fn tbx(&self) -> Option<&Tbx> { self.tbx.as_ref() }
 
     pub fn tbx_mut(&mut self) -> Option<&mut Tbx> { self.tbx.as_mut() }
@@ -351,6 +356,13 @@ impl HtsHdr {
         match self {
             HtsHdr::Vcf(h) => h.seq_names(),
             HtsHdr::Sam(h) => h.seq_names(),
+        }
+    }
+
+    pub fn seq_lengths(&self) -> Vec<usize> {
+        match self {
+            HtsHdr::Vcf(h) => h.seq_lengths(),
+            HtsHdr::Sam(h) => h.seq_lengths(),
         }
     }
 }

@@ -88,6 +88,11 @@ impl VcfHeader {
         }
     }
 
+    pub fn seq_lengths(&self) -> Vec<usize> {
+        let n = self.n_ref() as usize;
+        (0..n).map(|i| self.id2len(i)).collect()
+    }
+
     pub fn append<S: AsRef<str>>(&mut self, line: S) -> io::Result<()> {
         match unsafe { bcf_hdr_append(self.as_mut(), get_cstr(line).as_ptr()) } {
             0 => Ok(()),
