@@ -243,7 +243,11 @@ impl Hts {
         if let Ok((get_id, hdr)) = self.get_parse_data() {
             for (ix, reg) in regs.iter().enumerate() {
                 let r = get_cstr(reg);
-                if let Ok(mut region) = Self::_parse_region(get_id, hdr, r.as_ref()) {
+                if let Ok(mut region) = match r.to_bytes() {
+                    [b'.'] => Ok(Region::make(HTS_IDX_START, 0, 0)),
+                    [b'*'] => Ok(Region::make(HTS_IDX_NOCOOR, 0, 0)),
+                    _ => Self::_parse_region(get_id, hdr, r.as_ref()),
+                } {
                     region.set_idx(Some(ix as u32));
                     rlist.add_region(region)
                 }
