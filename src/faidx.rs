@@ -100,6 +100,9 @@ pub struct Sequence {
     len: usize,
 }
 
+unsafe impl Send for Sequence {}
+unsafe impl Sync for Sequence {}
+
 impl Drop for Sequence {
     fn drop(&mut self) {
         unsafe { free(self.inner.as_ptr() as *mut c_void) }
