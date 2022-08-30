@@ -3,6 +3,9 @@ use std::{
     ptr::NonNull,
     marker::PhantomData,
     ops::{Deref, DerefMut},
+    path::Path,
+    os::unix::ffi::OsStrExt,
+    ffi::CString,
 };
 
 use super::{from_cstr, get_cstr, hts_err, HtsPos};
@@ -84,10 +87,11 @@ impl DerefMut for Faidx {
 }
 
 impl Faidx {
-    pub fn load<S: AsRef<str>>(name: S) -> io::Result<Faidx> {
-        let name = name.as_ref();
-        match NonNull::new(unsafe{ fai_load(get_cstr(name).as_ptr())}) {
-            None => Err(hts_err(format!("Failed to load reference file index {}", name))),
+    pub fn load<S: AsRef<Path>>(name: S) -> io::Result<Faidx> {
+        let cname = CString::new(name.as_ref().as_os_str().as_bytes())?;
+
+        match NonNull::new(unsafe{ fai_load(cname.as_ptr())}) {
+            None => Err(hts_err(format!("Failed to load reference file index {}", name.as_ref().display()))),
             Some(idx) => Ok(Faidx{inner: idx, phantom: PhantomData}),
         }
     }
