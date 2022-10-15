@@ -1,6 +1,6 @@
 use std::{
     io,
-    ptr::NonNull,
+    ptr::{NonNull, null},
     marker::PhantomData,
     ops::{Deref, DerefMut},
     path::Path,
@@ -55,6 +55,7 @@ impl faidx_t {
 
 extern "C" {
     fn fai_load(fn_: *const c_char) -> *mut faidx_t;
+    fn fai_load3(fn_: *const c_char, fnai: *const c_char, fngzi: *const c_char, flags: c_int) -> *mut faidx_t;
     fn faidx_nseq(fai: *const faidx_t) -> c_int;
     fn faidx_iseq(fai: *const faidx_t, n: c_int) -> *const c_char;
     fn faidx_seq_len(fai: *const faidx_t, seq: *const c_char) -> c_int;
@@ -88,6 +89,14 @@ impl DerefMut for Faidx {
 
 impl Faidx {
     pub fn load<S: AsRef<Path>>(name: S) -> io::Result<Faidx> {
+        let cname = CString::new(name.as_ref().as_os_str().as_bytes())?;
+
+        match NonNull::new(unsafe{ fai_load3(cname.as_ptr(), null(), null(), 0)}) {
+            None => Err(hts_err(format!("Failed to load reference file index {}", name.as_ref().display()))),
+            Some(idx) => Ok(Faidx{inner: idx, phantom: PhantomData}),
+        }
+    }
+    pub fn load_or_create<S: AsRef<Path>>(name: S) -> io::Result<Faidx> {
         let cname = CString::new(name.as_ref().as_os_str().as_bytes())?;
 
         match NonNull::new(unsafe{ fai_load(cname.as_ptr())}) {
