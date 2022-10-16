@@ -130,13 +130,20 @@ impl Sequence {
         } else {
             let a = x - self.start;
             let b = (y + 1 - self.start).min(self.len);
-            let slice = unsafe { std::slice::from_raw_parts(self.inner.as_ptr(), self.len) };
+            let slice = self.seq();
             Ok(&slice[a..b])
         }
     }
+
+    // Get entire loaded sequence as a slice
+    pub fn seq(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.inner.as_ptr(), self.len) }
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
