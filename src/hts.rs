@@ -17,7 +17,7 @@ use std::{
 use crate::{
     tbx_index_load3, VcfHeader, SamHeader, Tbx, vcf_read_itr, bcf_read_itr, tbx_read_itr, tbx_name2id,
     sam_itr_queryi, sam_hdr_t, bam_name2id, BamRec, BcfRec, TbxRec, bcf_hdr_name2id,
-    get_cstr, hts_err, bcf_hdr_t, tbx_t
+    get_cstr, hts_err, bcf_hdr_t, tbx_t, BCF_DT_CTG
 };
 
 pub struct Hts {
@@ -71,6 +71,14 @@ impl Hts {
     pub fn seq_lengths(&self) -> Vec<usize> {
         if let Some(h) = self.header.as_ref() { h.seq_lengths() }
         else { Vec::new() }
+    }
+
+    pub fn seq_length(&self, ctg: &str) -> Option<usize> {
+        self.header.as_ref().and_then(|h| h.seq_length(ctg))
+    }
+
+    pub fn name2tid(&self, ctg: &str) -> Option<usize> {
+        self.header.as_ref().and_then(|h| h.name2tid(ctg))
     }
 
     pub fn tbx(&self) -> Option<&Tbx> { self.tbx.as_ref() }
@@ -367,6 +375,20 @@ impl HtsHdr {
         match self {
             HtsHdr::Vcf(h) => h.seq_lengths(),
             HtsHdr::Sam(h) => h.seq_lengths(),
+        }
+    }
+
+    pub fn seq_length(&self, ctg: &str) -> Option<usize> {
+        match self {
+            HtsHdr::Vcf(h) => h.id2int(BCF_DT_CTG as usize, ctg).map(|i| h.id2len(i)),
+            HtsHdr::Sam(h) => h.name2tid(ctg).map(|i| h.tid2len(i)),
+        }
+    }
+
+    pub fn name2tid(&self, ctg: &str) -> Option<usize> {
+        match self {
+            HtsHdr::Vcf(h) => h.id2int(BCF_DT_CTG as usize, ctg),
+            HtsHdr::Sam(h) => h.name2tid(ctg),
         }
     }
 }
