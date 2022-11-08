@@ -14,7 +14,8 @@ pub mod kstring;
 pub mod tbx;
 pub use tbx::*;
 pub mod regidx;
-
+pub mod malloc_data_block;
+pub use malloc_data_block::*;
 pub use kstring::*;
 
 fn get_cstr<S: AsRef<str>>(s: S) -> CString {

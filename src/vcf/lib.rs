@@ -1,7 +1,8 @@
 use std::{
    ptr::NonNull,
    convert::{AsRef, AsMut, TryFrom},
-   io
+   io,
+   ffi::CString,
 };
 
 use super::{
@@ -9,7 +10,7 @@ use super::{
    BGZF, BcfRec, VcfHeader
 };
 
-use crate::{get_cstr, from_cstr, hts_err};
+use crate::{get_cstr, from_cstr, hts_err, sam_hdr_t, MallocDataBlock, Hts, hts_get_vcf_header};
 
 use crate::bgzf_getline;
 
@@ -46,6 +47,25 @@ pub const BCF_INT16_VECTOR_END: i16 = i16::MIN + 1;
 pub const BCF_INT32_VECTOR_END: i32 = i32::MIN + 1;
 pub const BCF_INT64_VECTOR_END: i64 = i64::MIN + 1;
 pub const BCF_FLOAT_VECTOR_END: u32 = 0x7f800002;
+
+// Variant types
+pub const VCF_REF: u32 = 0;
+pub const VCF_SNP: u32 = 1 << 0;
+pub const VCF_MNP: u32 = 1 << 1;
+pub const VCF_INDEL: u32 = 1 << 2;
+pub const VCF_OTHER: u32 = 1 << 3;
+pub const VCF_BND: u32 = 1 << 4;
+pub const VCF_OVERLAP: u32 = 1 << 5;
+pub const VCF_INS: u32 = 1 << 6;
+pub const VCF_DEL: u32 = 1 << 7;
+pub const VCF_ANY: u32 = VCF_SNP | VCF_MNP | VCF_INDEL | VCF_OTHER | VCF_BND | VCF_OVERLAP | VCF_INS | VCF_DEL;
+
+#[repr(C)]
+pub enum BcfVariantMatch {
+   Exact,
+   Overlap,
+   Subset,
+}
 
 macro_rules! mk_try_from {
    ($en:ty, $base:ty, $t:ty) => {
@@ -115,7 +135,6 @@ impl TryFrom<u16> for BcfHeaderType {
          3 => Ok(Self::Str),
          0x101 => Ok(Self::Long),
          _ => {
-            eprintln!("OOOK! {}", value);
             Err("Bad BCF Header type")
          },
       }
@@ -391,6 +410,12 @@ extern "C" {
    pub(super) fn bcf_hrec_find_key(hrec: *const bcf_hrec_t, key: *const c_char) -> c_int;
    pub(super) fn vcf_format(hdr: *const bcf_hdr_t, v: *mut bcf1_t, s: *mut kstring_t) -> c_int;
    pub(super) fn vcf_parse(s: *mut kstring_t, hdr: *const bcf_hdr_t, v: *mut bcf1_t) -> c_int;
+   pub(crate) fn bcf_idx_init(fp: *mut htsFile, hd: *const bcf_hdr_t, min_shift: c_int, fnidx: *const c_char) -> c_int;
+   pub(crate) fn bcf_idx_save(fp: *mut htsFile) -> c_int;
+   fn bcf_has_variant_types(rec: *mut bcf1_t, bitmask: u32, mode: BcfVariantMatch) -> c_int;
+   fn bcf_has_variant_type(rec: *mut bcf1_t, allele: c_int, bitmask: u32) -> c_int;
+   fn bcf_get_format_values(hdr: *const bcf_hdr_t, line: *mut bcf1_t, tag: *const c_char, dst: *mut *mut c_void, ndst: *mut c_int, _type: c_int) -> c_int;
+   fn bcf_get_info_values(hdr: *const bcf_hdr_t, line: *mut bcf1_t, tag: *const c_char, dst: *mut *mut c_void, ndst: *mut c_int, _type: c_int) -> c_int;
 }
 
 pub const BCF_BT_NULL: c_int = 0;
@@ -407,6 +432,10 @@ pub const MAX_BT_INT32: i32 = 0x7fffffff; /* INT32_MAX */
 pub const BCF_MIN_BT_INT8: i32 = -120; /* INT8_MIN  + 8 */
 pub const BCF_MIN_BT_INT16: i32 = -32760; /* INT16_MIN + 8 */
 pub const BCF_MIN_BT_INT32: i32 = -2147483640; /* INT32_MIN + 8 */
+
+pub const BCF_HT_INT: c_int = 1;
+pub const BCF_HT_REAL: c_int = 2;
+pub const BCF_HT_STR: c_int = 3;
 
 #[repr(C)]
 pub(super) union info_val {
@@ -487,6 +516,19 @@ pub(super) struct bcf_dec_t {
    indiv_dirty: c_int,
 }
 
+fn prepare_format_args<T>(tag: &str, buf: &mut MallocDataBlock<T>) -> (CString, *mut T, c_int) {
+   let (p, _, cap) = unsafe {buf.raw_parts()};
+   let cap = cap as c_int;
+   let tag = CString::new(tag).unwrap();
+   (tag, p, cap)
+}
+
+fn ret_format_res<T>(p: *mut T, len: c_int, cap: c_int, buf: &mut MallocDataBlock<T>) -> Option<usize> {
+   unsafe{buf.update_raw_parts(p, len as usize, cap as usize)};
+   if len < 0 { None }
+   else { Some(buf.len()) }
+}
+
 #[repr(C)]
 #[derive(BitfieldStruct)]
 pub struct bcf1_t {
@@ -513,13 +555,14 @@ impl bcf1_t {
    pub fn clear(&mut self) {
       unsafe { bcf_clear(self) }
    }
-
    pub fn shared(&mut self) -> &mut kstring_t {
       &mut self.shared
    }
    pub fn indiv(&mut self) -> &mut kstring_t {
       &mut self.indiv
    }
+   pub fn rid(&self) -> usize { self.rid as usize}
+   pub fn pos(&self) -> usize { self.pos as usize}
    pub fn set_rid(&mut self, rid: usize) {
       self.rid = rid as i32
    }
@@ -537,6 +580,60 @@ impl bcf1_t {
    }
 
    pub fn unpack(&mut self, which: usize) { unsafe{bcf_unpack(self, which as c_int)} }
+   pub fn has_variant_types(&mut self, mask: u32, mode: BcfVariantMatch) -> io::Result<bool> {
+      let ret = unsafe { bcf_has_variant_types(self, mask, mode) };
+      if ret < 0 {
+         Err(hts_err("Error returned from bcf_has_variant_types()".to_string()))
+      } else {
+         Ok(ret > 0)
+      }
+   }
+   pub fn has_variant_type(&mut self, i: usize, mask: u32) -> io::Result<bool> {
+      let ret = unsafe { bcf_has_variant_type(self, i as c_int, mask) };
+      if ret < 0 {
+         Err(hts_err("Error returned from bcf_has_variant_type()".to_string()))
+      } else {
+         Ok(ret > 0)
+      }
+   }
+   pub fn id(&mut self) -> &str {
+      self.unpack(BCF_UN_STR);
+      from_cstr(self.d.id)
+   }
+   pub fn check_pass(&mut self) -> bool {
+      self.unpack(BCF_UN_FLT);
+      let d = &self.d;
+      let flt = d.flt;
+      if flt.is_null() { panic!("BCF record filter is null") }
+      for i in 0..(d.n_flt as usize) { if unsafe{*d.flt.add(i)} == 0 { return true }}
+      false
+   }
+   pub fn alleles(&mut self) -> Vec<&str> {
+      self.unpack(BCF_UN_STR);
+      let n_all = self.n_allele() as usize;
+      let mut v = Vec::with_capacity(n_all);
+      let all = &self.d.alleles;
+      if all.is_null() { panic!("BCF allele desc is null")}
+      for i in 0..n_all {	v.push(from_cstr(unsafe{*all.add(i)}))}
+      v
+   }
+   pub fn get_format_values<T>(&mut self, hts: &Hts, tag: &str, buf: &mut MallocDataBlock<T>, vtype: c_int) -> Option<usize> {
+      hts_get_vcf_header(hts).and_then(|hdr| {
+      let (tag, mut p, mut cap) = prepare_format_args(tag, buf);
+      let len = unsafe {bcf_get_format_values(hdr.as_ref(), self, tag.as_ptr(), &mut p as *mut *mut T as *mut *mut c_void, &mut cap as *mut c_int, vtype)};
+      ret_format_res(p, len, cap, buf) })
+   }
+   pub fn get_format_i32(&mut self, hts: &Hts, tag: &str, buf: &mut MallocDataBlock<i32>) -> Option<usize> { self.get_format_values(hts, tag, buf, BCF_HT_INT)}
+   pub fn get_format_f32(&mut self, hts: &Hts, tag: &str, buf: &mut MallocDataBlock<f32>) -> Option<usize> { self.get_format_values(hts, tag, buf, BCF_HT_REAL)}
+   pub fn get_format_u8(&mut self, hts: &Hts, tag: &str, buf: &mut MallocDataBlock<u8>) -> Option<usize> { self.get_format_values(hts, tag, buf, BCF_HT_STR)}
+   pub fn get_genotypes(&mut self, hts: &Hts, buf: &mut MallocDataBlock<i32>) -> Option<usize> { self.get_format_i32(hts, "GT", buf) }
+
+   pub fn get_info_values<T, H: AsRef<bcf_hdr_t>>(&mut self, hdr: H, tag: &str, buf: &mut MallocDataBlock<T>, vtype: c_int) -> Option<usize> {
+      let (tag, mut p, mut cap) = prepare_format_args(tag, buf);
+      let len = unsafe {bcf_get_info_values(hdr.as_ref(), self, tag.as_ptr(), &mut p as *mut *mut T as *mut *mut c_void, &mut cap as *mut c_int, vtype)};
+      ret_format_res(p, len, cap, buf)
+   }
+   pub fn get_info_u8(&mut self, hdr: &VcfHeader, tag: &str, buf: &mut MallocDataBlock<u8>) -> Option<usize> { self.get_info_values(hdr, tag, buf, BCF_HT_STR)}
 }
 
 pub (crate) unsafe extern "C" fn vcf_read_itr(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int {

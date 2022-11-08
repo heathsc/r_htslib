@@ -60,6 +60,8 @@ extern "C" {
    pub(super) fn sam_hdr_find_tag_pos(hd: *mut sam_hdr_t, type_: *const c_char, pos: c_int, key: *const c_char, ks: *mut kstring_t, ) -> c_int;
    pub(super) fn sam_hdr_count_lines(hd: *mut sam_hdr_t, type_: *const c_char) -> c_int;
    pub(crate) fn sam_itr_queryi(idx: *const hts_idx_t, tid: c_int, start: HtsPos, end: HtsPos) -> *mut hts_itr_t;
+   pub(crate) fn sam_idx_init(fp: *mut htsFile, hd: *const sam_hdr_t, min_shift: c_int, fnidx: *const c_char) -> c_int;
+   pub(crate) fn sam_idx_save(fp: *mut htsFile) -> c_int;
 }
 
 pub (crate) unsafe extern "C" fn bam_name2id(hdr: *mut c_void, s: *const c_char) -> c_int {

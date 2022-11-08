@@ -68,6 +68,7 @@ extern "C" {
     ) -> *mut c_char;
 }
 
+#[derive(Debug)]
 pub struct Faidx {
     inner: NonNull<faidx_t>,
     phantom: PhantomData<faidx_t>,

@@ -544,3 +544,12 @@ impl <'a, T>Iterator for BcfValIter<'a, T>
         }
     }
 }
+
+pub fn hts_get_vcf_header(hts: &Hts) -> Option<&VcfHeader> {
+    hts.header().and_then(|h| {
+        match h {
+            HtsHdr::Vcf(vh) => Some(vh),
+            HtsHdr::Sam(_) => None,
+        }
+    })
+}

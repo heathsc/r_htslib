@@ -10,14 +10,14 @@ use std::{
     ops::{Deref, DerefMut},
     ffi::{CStr, CString},
     cmp::Ordering,
-    path::Path,
+    path::{Path, PathBuf},
     os::unix::ffi::OsStrExt,
 };
 
 use crate::{
     tbx_index_load3, VcfHeader, SamHeader, Tbx, vcf_read_itr, bcf_read_itr, tbx_read_itr, tbx_name2id,
     sam_itr_queryi, sam_hdr_t, bam_name2id, BamRec, BcfRec, TbxRec, bcf_hdr_name2id,
-    get_cstr, hts_err, bcf_hdr_t, tbx_t, BCF_DT_CTG
+    get_cstr, hts_err, bcf_hdr_t, tbx_t, BCF_DT_CTG, bcf_idx_init, bcf_idx_save, sam_idx_init, sam_idx_save
 };
 
 pub struct Hts {
@@ -31,22 +31,31 @@ unsafe impl Send for Hts {}
 unsafe impl Sync for Hts {}
 
 impl Hts {
-    pub fn open<S: AsRef<Path>>(name: S, mode: &str) -> io::Result<Self> {
+    pub fn open<P>(name: Option<P>, mode: &str) -> io::Result<Self>
+        where
+            P: AsRef<Path>,
+    {
         Self::open_format_(name, mode, None)
     }
 
-    pub fn open_format<S: AsRef<Path>>(name: S, mode: &str, fmt: &HtsFormat) -> io::Result<Self> {
+    pub fn open_format<P>(name: Option<P>, mode: &str, fmt: &HtsFormat) -> io::Result<Self>
+        where
+            P: AsRef<Path>,
+    {
         Self::open_format_(name, mode, Some(fmt))
     }
 
-    fn open_format_<S: AsRef<Path>>(name: S, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self> {
-        let name = name.as_ref();
-        let mut fp = HtsFile::open_format_(name, mode, fmt)?;
+    fn open_format_<P>(name: Option<P>, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self>
+        where
+            P: AsRef<Path>,
+    {
+        let name = name.map(|p| p.as_ref().to_owned()).unwrap_or_else(|| PathBuf::from("-"));
+        let mut fp = HtsFile::open_format_(&name, mode, fmt)?;
         let (header, tbx) = if fp.as_ref().is_write() == 0 {
             match fp.format().format {
                 htsExactFormat::Sam | htsExactFormat::Bam | htsExactFormat::Cram => (Some(HtsHdr::Sam(SamHeader::read(&mut fp)?)), None),
                 htsExactFormat::Bcf | htsExactFormat::Vcf => (Some(HtsHdr::Vcf(VcfHeader::read(&mut fp)?)), None),
-                _ => if let Ok(tbx) = Tbx::load(name) { (None, Some(tbx)) } else { (None, None) }
+                _ => if let Ok(tbx) = Tbx::load(&name) { (None, Some(tbx)) } else { (None, None) }
             }
         } else { (None, None) };
 
@@ -79,6 +88,10 @@ impl Hts {
 
     pub fn name2tid(&self, ctg: &str) -> Option<usize> {
         self.header.as_ref().and_then(|h| h.name2tid(ctg))
+    }
+
+    pub fn n_ref(&self) -> Option<usize> {
+        self.header.as_ref().map(|h| h.n_ref())
     }
 
     pub fn tbx(&self) -> Option<&Tbx> { self.tbx.as_ref() }
@@ -171,6 +184,31 @@ impl Hts {
                 || self.tbx.as_ref().map(|tbx| tbx.idx()),
                 |p| Some(p.as_ref()))
         } else { None }
+    }
+
+    pub fn idx_init(&mut self, min_shift: isize, fnidx: &str) -> io::Result<()> {
+        let (hts_file, hdr) = self.hts_file_and_header();
+        if let Some(h) = hdr {
+            let fnidx = get_cstr(fnidx);
+
+            let ret = match h {
+                HtsHdr::Vcf(h) => unsafe { bcf_idx_init(hts_file.as_mut(), h.as_ref(), min_shift as c_int, fnidx.as_ptr())}
+                HtsHdr::Sam(h) => unsafe { sam_idx_init(hts_file.as_mut(), h.as_ref(), min_shift as c_int, fnidx.as_ptr())}
+            };
+            if ret == 0 {
+                return Ok(())
+            }
+        }
+        Err(hts_err(format!("Failed to initialize index {} - wrong file type", fnidx)))
+    }
+
+    pub fn idx_save(&mut self) -> io::Result<()> {
+        let hts_file = &mut self.hts_file;
+        let ret = match hts_file.format().format {
+            htsExactFormat::Vcf | htsExactFormat::Bcf => unsafe { bcf_idx_save(hts_file.as_mut()) },
+            _ => unsafe {sam_idx_save(hts_file.as_mut())}
+        };
+        Ok(())
     }
 
     pub fn rec_type(&self) -> Option<HtsRecType> {
@@ -364,6 +402,13 @@ pub enum HtsHdr {
 }
 
 impl HtsHdr {
+    pub fn n_ref(&self) -> usize {
+        match self {
+            HtsHdr::Vcf(h) => h.n_ref() as usize,
+            HtsHdr::Sam(h) => h.nref(),
+        }
+    }
+
     pub fn seq_names(&self) -> Vec<&str> {
         match self {
             HtsHdr::Vcf(h) => h.seq_names(),
@@ -803,4 +848,12 @@ impl OwnedWriter {
 impl Write for OwnedWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.fd.write(buf) }
     fn flush(&mut self) -> io::Result<()> { self.fd.flush() }
+}
+
+pub fn hts_set_log_level(level: htsLogLevel) {
+    set_log_level(level)
+}
+
+pub fn hts_get_log_level() -> htsLogLevel {
+    get_log_level()
 }

@@ -318,6 +318,10 @@ impl htsFormat {
    pub fn format(&self) -> &htsExactFormat { &self.format }
 }
 
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub enum htsLogLevel { HTS_LOG_OFF, HTS_LOG_ERROR, HTS_LOG_WARNING = 3, HTS_LOG_INFO, HTS_LOG_DEBUG, HTS_LOG_TRACE }
+
 #[link(name = "hts")]
 extern "C" {
    pub(super) fn hts_open_format(fn_: *const c_char, mode: *const c_char, fmt: *const htsFormat) -> *mut prehtsFile;
@@ -346,6 +350,16 @@ extern "C" {
    fn hwrite2(fp: *mut hfile, data: *const c_void, total: size_t, copied: size_t) -> ssize_t;
    pub(crate) fn hts_itr_multi_next(fp: *mut htsFile, itr: *mut hts_itr_t, r: *mut c_void) -> c_int;
    pub(crate) fn hts_itr_next(fp: *mut BGZF, itr: *mut hts_itr_t, r: *mut c_void, data: *mut c_void) -> c_int;
+   fn hts_set_log_level(level: htsLogLevel);
+   fn hts_get_log_level() -> htsLogLevel;
+}
+
+pub(super) fn set_log_level(level: htsLogLevel) {
+   unsafe { hts_set_log_level(level) }
+}
+
+pub(super) fn get_log_level() -> htsLogLevel {
+   unsafe { hts_get_log_level() }
 }
 
 pub fn hwrite(fp: &mut hfile, data: *const u8, nbytes: size_t) -> ssize_t {
