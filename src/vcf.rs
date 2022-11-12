@@ -12,7 +12,7 @@ pub mod lib;
 pub use lib::*;
 
 use super::{
-    from_cstr, get_cstr, htsFile, hts_err, kstring_t, Hts, HtsFile, HtsPos, HtsHdr,
+    from_cstr, c_to_cstr, get_cstr, htsFile, hts_err, kstring_t, Hts, HtsFile, HtsPos, HtsHdr,
     HtsRead, HtsWrite, HtsItr, BGZF, hts_itr_next, HtsFileDesc
 };
 use libc::{c_int, c_void};
@@ -297,6 +297,29 @@ impl BcfRec {
         } else {
             Err(hts_err("Wrong header type for VCF format".to_string()))
         }
+    }
+
+    pub fn get_alleles<'a>(&'a mut self) -> Vec<&'a str> {
+        self.unpack(BCF_UN_STR);
+        let n_all = self.n_allele() as usize;
+        let mut v = Vec::with_capacity(n_all);
+        let all = &self.d.alleles;
+        if all.is_null() { panic!("BCF allele desc is null")}
+        for i in 0..n_all {	v.push(from_cstr::<'a>(unsafe{*all.add(i)}))}
+        v
+    }
+    pub fn get_alleles_by<'a, F>(&'a mut self, mut f: F)
+    where
+        F: FnMut(&'a [u8])
+    {
+        self.unpack(BCF_UN_STR);
+        let n_all = self.n_allele() as usize;
+        let all = &self.as_ref().d.alleles;
+        if all.is_null() { panic!("BCF allele desc is null")}
+
+        for i in 0..n_all {
+            f(c_to_cstr( unsafe { *all.add(i) } ).to_bytes())
+         }
     }
 
     pub fn get_fmt<'a, T: BcfHeaderVar<'a, T>>(&'a mut self, htag: &BcfTag<T>) -> Option<BcfVecIter<'a, T>> { htag.get_fmt(self) }

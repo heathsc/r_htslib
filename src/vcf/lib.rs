@@ -1,5 +1,6 @@
 use std::{
    ptr::NonNull,
+   marker::PhantomData,
    convert::{AsRef, AsMut, TryFrom},
    io,
    ffi::CString,
@@ -10,7 +11,7 @@ use super::{
    BGZF, BcfRec, VcfHeader
 };
 
-use crate::{get_cstr, from_cstr, hts_err, sam_hdr_t, MallocDataBlock, Hts, hts_get_vcf_header};
+use crate::{get_cstr, from_cstr, hts_err, sam_hdr_t};
 
 use crate::bgzf_getline;
 
@@ -506,7 +507,7 @@ pub(super) struct bcf_dec_t {
    pub(super) flt: *mut c_int,
    id: *mut c_char,
    als: *mut c_char,
-   alleles: *mut *mut c_char,
+   pub(super) alleles: *mut *mut c_char,
    pub(super) info: *mut bcf_info_t,
    pub(super) fmt: *mut bcf_fmt_t,
    var: *mut bcf_variant_t,
@@ -514,19 +515,6 @@ pub(super) struct bcf_dec_t {
    var_type: c_int,
    shared_dirty: c_int,
    indiv_dirty: c_int,
-}
-
-fn prepare_format_args<T>(tag: &str, buf: &mut MallocDataBlock<T>) -> (CString, *mut T, c_int) {
-   let (p, _, cap) = unsafe {buf.raw_parts()};
-   let cap = cap as c_int;
-   let tag = CString::new(tag).unwrap();
-   (tag, p, cap)
-}
-
-fn ret_format_res<T>(p: *mut T, len: c_int, cap: c_int, buf: &mut MallocDataBlock<T>) -> Option<usize> {
-   unsafe{buf.update_raw_parts(p, len as usize, cap as usize)};
-   if len < 0 { None }
-   else { Some(buf.len()) }
 }
 
 #[repr(C)]
@@ -608,32 +596,6 @@ impl bcf1_t {
       for i in 0..(d.n_flt as usize) { if unsafe{*d.flt.add(i)} == 0 { return true }}
       false
    }
-   pub fn alleles(&mut self) -> Vec<&str> {
-      self.unpack(BCF_UN_STR);
-      let n_all = self.n_allele() as usize;
-      let mut v = Vec::with_capacity(n_all);
-      let all = &self.d.alleles;
-      if all.is_null() { panic!("BCF allele desc is null")}
-      for i in 0..n_all {	v.push(from_cstr(unsafe{*all.add(i)}))}
-      v
-   }
-   pub fn get_format_values<T>(&mut self, hts: &Hts, tag: &str, buf: &mut MallocDataBlock<T>, vtype: c_int) -> Option<usize> {
-      hts_get_vcf_header(hts).and_then(|hdr| {
-      let (tag, mut p, mut cap) = prepare_format_args(tag, buf);
-      let len = unsafe {bcf_get_format_values(hdr.as_ref(), self, tag.as_ptr(), &mut p as *mut *mut T as *mut *mut c_void, &mut cap as *mut c_int, vtype)};
-      ret_format_res(p, len, cap, buf) })
-   }
-   pub fn get_format_i32(&mut self, hts: &Hts, tag: &str, buf: &mut MallocDataBlock<i32>) -> Option<usize> { self.get_format_values(hts, tag, buf, BCF_HT_INT)}
-   pub fn get_format_f32(&mut self, hts: &Hts, tag: &str, buf: &mut MallocDataBlock<f32>) -> Option<usize> { self.get_format_values(hts, tag, buf, BCF_HT_REAL)}
-   pub fn get_format_u8(&mut self, hts: &Hts, tag: &str, buf: &mut MallocDataBlock<u8>) -> Option<usize> { self.get_format_values(hts, tag, buf, BCF_HT_STR)}
-   pub fn get_genotypes(&mut self, hts: &Hts, buf: &mut MallocDataBlock<i32>) -> Option<usize> { self.get_format_i32(hts, "GT", buf) }
-
-   pub fn get_info_values<T, H: AsRef<bcf_hdr_t>>(&mut self, hdr: H, tag: &str, buf: &mut MallocDataBlock<T>, vtype: c_int) -> Option<usize> {
-      let (tag, mut p, mut cap) = prepare_format_args(tag, buf);
-      let len = unsafe {bcf_get_info_values(hdr.as_ref(), self, tag.as_ptr(), &mut p as *mut *mut T as *mut *mut c_void, &mut cap as *mut c_int, vtype)};
-      ret_format_res(p, len, cap, buf)
-   }
-   pub fn get_info_u8(&mut self, hdr: &VcfHeader, tag: &str, buf: &mut MallocDataBlock<u8>) -> Option<usize> { self.get_info_values(hdr, tag, buf, BCF_HT_STR)}
 }
 
 pub (crate) unsafe extern "C" fn vcf_read_itr(fp: *mut BGZF, data: *mut c_void, r: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int {

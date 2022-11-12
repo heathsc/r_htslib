@@ -14,22 +14,27 @@ pub mod kstring;
 pub mod tbx;
 pub use tbx::*;
 pub mod regidx;
-pub mod malloc_data_block;
-pub use malloc_data_block::*;
 pub use kstring::*;
 
+#[inline]
 fn get_cstr<S: AsRef<str>>(s: S) -> CString {
     CString::new(s.as_ref().as_bytes()).unwrap()
 }
 
-fn from_cstr<'a>(cstr: *const i8) -> &'a str {
-    if cstr.is_null() {
+#[inline]
+fn from_cstr<'a>(c: *const i8) -> &'a str {
+    c_to_cstr(c)
+        .to_str()
+        .expect("String not UTF8")
+}
+
+#[inline]
+fn c_to_cstr<'a>(c: *const i8) -> &'a CStr {
+    if c.is_null() {
         panic!("from_cstr() called with a NULL");
     }
     unsafe {
-        CStr::from_ptr(cstr)
-            .to_str()
-            .expect("String not UTF8")
+        CStr::from_ptr(c)
     }
 }
 
