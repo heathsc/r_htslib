@@ -67,6 +67,10 @@ impl Hts {
         })
     }
 
+    pub fn set_header(&mut self, hdr: Option<HtsHdr>) {
+        self.header = hdr
+    }
+
     pub fn header(&self) -> Option<&HtsHdr> { self.header.as_ref() }
 
     pub fn header_mut(&mut self) -> Option<&mut HtsHdr> { self.header.as_mut() }
@@ -186,11 +190,9 @@ impl Hts {
         } else { None }
     }
 
-    pub fn idx_init(&mut self, min_shift: isize, fnidx: &str) -> io::Result<()> {
+    pub fn idx_init(&mut self, min_shift: isize, fnidx: &CStr) -> io::Result<()> {
         let (hts_file, hdr) = self.hts_file_and_header();
         if let Some(h) = hdr {
-            let fnidx = get_cstr(fnidx);
-
             let ret = match h {
                 HtsHdr::Vcf(h) => unsafe { bcf_idx_init(hts_file.as_mut(), h.as_ref(), min_shift as c_int, fnidx.as_ptr())}
                 HtsHdr::Sam(h) => unsafe { sam_idx_init(hts_file.as_mut(), h.as_ref(), min_shift as c_int, fnidx.as_ptr())}
@@ -199,7 +201,7 @@ impl Hts {
                 return Ok(())
             }
         }
-        Err(hts_err(format!("Failed to initialize index {} - wrong file type", fnidx)))
+        Err(hts_err(format!("Failed to initialize index {:?} - wrong file type", fnidx)))
     }
 
     pub fn idx_save(&mut self) -> io::Result<()> {
@@ -208,7 +210,11 @@ impl Hts {
             htsExactFormat::Vcf | htsExactFormat::Bcf => unsafe { bcf_idx_save(hts_file.as_mut()) },
             _ => unsafe {sam_idx_save(hts_file.as_mut())}
         };
-        Ok(())
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(hts_err("Failed to save index".to_string()))
+        }
     }
 
     pub fn rec_type(&self) -> Option<HtsRecType> {
@@ -351,7 +357,12 @@ impl AsMut<htsFile> for HtsFile {
 
 impl Drop for HtsFile {
     fn drop(&mut self) {
-        unsafe { hts_close(self.as_mut()) };
+        unsafe {
+            if self.as_ref().is_write() == 0 {
+                hts_flush(self.as_mut());
+            }
+            hts_close(self.as_mut())
+        };
     }
 }
 
@@ -439,6 +450,7 @@ impl HtsHdr {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct HtsThreadPool {
     inner: NonNull<hts_tpool>,
     qsize: c_int,

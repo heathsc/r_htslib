@@ -62,6 +62,7 @@ extern "C" {
    pub(crate) fn sam_itr_queryi(idx: *const hts_idx_t, tid: c_int, start: HtsPos, end: HtsPos) -> *mut hts_itr_t;
    pub(crate) fn sam_idx_init(fp: *mut htsFile, hd: *const sam_hdr_t, min_shift: c_int, fnidx: *const c_char) -> c_int;
    pub(crate) fn sam_idx_save(fp: *mut htsFile) -> c_int;
+   pub fn sam_hdr_add_pg(hd: *mut sam_hdr_t, name: *const c_char, ...) -> c_int;
 }
 
 pub (crate) unsafe extern "C" fn bam_name2id(hdr: *mut c_void, s: *const c_char) -> c_int {
@@ -363,6 +364,20 @@ impl bam1_t {
       }
    }
 
+   pub fn get_seq_mut(&mut self) -> Option<&mut[u8]> {
+      if self.data.is_null() {
+         None
+      } else {
+         unsafe {
+            let core = &self.core;
+            let off = ((core.n_cigar as isize) << 2) + (core.l_qname as isize) as isize;
+            let p = self.data.offset(off) as *mut u8;
+            let size = (core.l_qseq + 1) >> 1;
+            Some(std::slice::from_raw_parts_mut(p, size as usize))
+         }
+      }
+   }
+
    pub fn get_qual(&self) -> Option<&[u8]> {
       if self.data.is_null() {
          None
@@ -373,6 +388,20 @@ impl bam1_t {
             let p = self.data.offset(off) as *const u8;
             let size = core.l_qseq;
             Some(std::slice::from_raw_parts(p, size as usize))
+         }
+      }
+   }
+
+   pub fn get_qual_mut(&mut self) -> Option<&mut [u8]> {
+      if self.data.is_null() {
+         None
+      } else {
+         unsafe {
+            let core = &self.core;
+            let off = ((core.n_cigar as isize) << 2) + (core.l_qname as isize) + ((core.l_qseq + 1) >> 1) as isize;
+            let p = self.data.offset(off) as *mut u8;
+            let size = core.l_qseq;
+            Some(std::slice::from_raw_parts_mut(p, size as usize))
          }
       }
    }

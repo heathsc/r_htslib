@@ -41,6 +41,9 @@ impl AsMut<sam_hdr_t> for SamHeader {
    fn as_mut(&mut self) -> &mut sam_hdr_t { self}
 }
 
+unsafe impl Send for SamHeader {}
+unsafe impl Sync for SamHeader {}
+
 impl Drop for SamHeader {
    fn drop(&mut self) {
       unsafe { sam_hdr_destroy(self.as_mut()) };

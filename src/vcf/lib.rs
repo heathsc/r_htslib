@@ -1,9 +1,7 @@
 use std::{
    ptr::NonNull,
-   marker::PhantomData,
    convert::{AsRef, AsMut, TryFrom},
    io,
-   ffi::CString,
 };
 
 use super::{
@@ -11,7 +9,7 @@ use super::{
    BGZF, BcfRec, VcfHeader
 };
 
-use crate::{get_cstr, from_cstr, hts_err, sam_hdr_t};
+use crate::{get_cstr, from_cstr, hts_err, sam_hdr_t, try_from_cstr};
 
 use crate::bgzf_getline;
 
@@ -88,16 +86,17 @@ macro_rules! mk_try_from {
 // Header Line
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BcfHeaderLine {
+#[repr(C)]
+pub enum BcfHeaderLineType {
    Flt = 0,
    Info = 1,
    Fmt = 2,
    Ctg = 3,
    Str = 4, // Structure header line TAG=<A..,B=..>
-   Gen = 5, // Structure header line TAG=<A..,B=..>
+   Gen = 5,
 }
 
-impl TryFrom<u8> for BcfHeaderLine {
+impl TryFrom<u8> for BcfHeaderLineType {
    type Error = &'static str;
 
    fn try_from(value: u8) -> Result<Self, Self::Error> {
@@ -107,13 +106,13 @@ impl TryFrom<u8> for BcfHeaderLine {
          2 => Ok(Self::Fmt),
          3 => Ok(Self::Ctg),
          4 => Ok(Self::Str),
-         5 => Ok(Self::Ctg),
-         _ => Err("Bad BCF Header line"),
+         5 => Ok(Self::Gen),
+         _ => Err("Bad BCF Header line type"),
       }
    }
 }
 
-mk_try_from!(BcfHeaderLine, u8, i8, i16, i32, i64, isize, u16, u32, u64, usize);
+mk_try_from!(BcfHeaderLineType, u8, i8, i16, i32, i64, isize, u16, u32, u64, usize);
 
 // Header Line
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -315,8 +314,8 @@ impl bcf_hrec_t {
          Some(unsafe { from_cstr(*self.vals.add(ix as usize))})
       }
    }
-   pub fn key(&self) -> &str { from_cstr(self.key) }
-   pub fn val(&self) -> &str { from_cstr(self.val) }
+   pub fn key(&self) -> Option<&str> { try_from_cstr(self.key) }
+   pub fn val(&self) -> Option<&str> { try_from_cstr(self.val) }
    pub fn vals(&self, ix: usize) -> io::Result<&str> {
       if ix >= self.nkeys() { Err(hts_err("Invalid key id".to_string()))}
       else { Ok(from_cstr(unsafe{*self.vals.add(ix)})) }
@@ -325,7 +324,7 @@ impl bcf_hrec_t {
       if ix >= self.nkeys() { Err(hts_err("Invalid key id".to_string()))}
       else { Ok(from_cstr(unsafe{*self.keys.add(ix)})) }
    }
-   pub fn get_type(&self) -> c_int { self._type }
+   pub fn get_header_line_type(&self) -> BcfHeaderLineType { BcfHeaderLineType::try_from(self._type).expect("Illegal Header Line") }
 }
 
 #[repr(C)]
@@ -354,12 +353,12 @@ pub struct vdict_t {
 
 #[repr(C)]
 pub struct bcf_hdr_t {
-   pub(super) n: [i32; 3],
-   pub(super) id: [*mut bcf_idpair_t; 3],
-   pub(super) dict: [*mut vdict_t; 3],
-   pub(super) samples: *mut *mut c_char,
-   pub(super) hrec: *mut *mut bcf_hrec_t,
-   pub(super) nhrec: c_int,
+   n: [i32; 3],
+   id: [*mut bcf_idpair_t; 3],
+   dict: [*mut vdict_t; 3],
+   samples: *mut *mut c_char,
+   hrec: *mut *mut bcf_hrec_t,
+   nhrec: c_int,
    dirty: c_int,
    ntransl: c_int,
    transl: [*mut c_int; 2],
@@ -374,6 +373,10 @@ impl bcf_hdr_t {
 
    pub fn n_ref(&self) -> i32 { self.n[BCF_DT_CTG as usize] }
 
+   pub(super) fn id(&self) -> &[*mut bcf_idpair_t; 3] {
+      &self.id
+   }
+
    pub fn id2len(&self, id: usize) -> usize {
       if id > self.n_ref() as usize {
          panic!("Invalid reference id {}", id)
@@ -384,6 +387,16 @@ impl bcf_hdr_t {
          ptr.add(id).as_ref().expect("invalid header struct")
             .val.as_ref().expect("Invalid header struct")
             .info[0] as usize
+      }
+   }
+
+   pub fn hrec(&self) -> Option<&[*mut bcf_hrec_t]> {
+      let p = self.hrec;
+      if p.is_null() {
+         None
+      } else {
+         let n = self.nhrec as usize;
+         Some(unsafe{std::slice::from_raw_parts(p, n)})
       }
    }
 }
@@ -399,6 +412,7 @@ extern "C" {
    pub(super) fn bcf_hdr_id2int(hdr: *const bcf_hdr_t, type_: c_int, id: *const c_char) -> c_int;
    pub(super) fn bcf_hdr_sync(hdr: *mut bcf_hdr_t) -> c_int;
    pub(super) fn bcf_hdr_seqnames(hdr: *const bcf_hdr_t, n_seqs: *mut c_int) -> *mut *const c_char;
+   pub(super) fn bcf_hdr_get_hrec(hdr: *const bcf_hdr_t, type_: c_int, key: *const c_char, value: *const c_char, str_class: *const c_char) -> *mut bcf_hrec_t;
    pub(super) fn bcf_init() -> *mut bcf1_t;
    pub(super) fn bcf_read(fp: *mut htsFile, hdr: *const bcf_hdr_t, v: *mut bcf1_t) -> c_int;
    pub(crate) fn bcf_readrec(fp: *mut BGZF, tbxv: *mut c_void, sv: *mut c_void, tid: *mut c_int, beg: *mut HtsPos, end: *mut HtsPos) -> c_int;

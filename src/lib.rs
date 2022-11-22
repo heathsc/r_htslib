@@ -17,19 +17,28 @@ pub mod regidx;
 pub use kstring::*;
 
 #[inline]
-fn get_cstr<S: AsRef<str>>(s: S) -> CString {
+pub fn get_cstr<S: AsRef<str>>(s: S) -> CString {
     CString::new(s.as_ref().as_bytes()).unwrap()
 }
 
 #[inline]
-fn from_cstr<'a>(c: *const i8) -> &'a str {
+pub fn try_from_cstr<'a>(c: *const i8) -> Option<&'a str> {
+    if c.is_null() {
+        None
+    } else {
+        Some(from_cstr(c))
+    }
+}
+
+#[inline]
+pub fn from_cstr<'a>(c: *const i8) -> &'a str {
     c_to_cstr(c)
         .to_str()
         .expect("String not UTF8")
 }
 
 #[inline]
-fn c_to_cstr<'a>(c: *const i8) -> &'a CStr {
+pub fn c_to_cstr<'a>(c: *const i8) -> &'a CStr {
     if c.is_null() {
         panic!("from_cstr() called with a NULL");
     }

@@ -137,6 +137,15 @@ impl htsFile {
          Ok(())
       }
    }
+
+   pub fn flush(&mut self) -> io::Result<()> {
+      let ret = unsafe { hts_flush(self) };
+      if ret != 0 {
+         Err(hts_err(format!("Failed to flush file {}", self.name())))
+      } else {
+         Ok(())
+      }
+   }
 }
 
 #[repr(C)]
@@ -345,6 +354,7 @@ extern "C" {
    pub(crate) fn bgzf_mt(fp: *mut BGZF, n_threads: c_int, n_sub_blocks: c_int) -> c_int;
 //   pub(crate) fn bgzf_block_write(fp: *mut BGZF, data: *const c_void, len: size_t) -> ssize_t;
    pub(crate) fn bgzf_flush(fp: *mut BGZF) -> c_int;
+   pub(crate) fn hts_flush(fp: *mut htsFile) -> c_int;
    pub(crate) fn hflush(fp: &mut hfile) -> c_int;
    fn hfile_set_blksize(fp: *mut hfile, bufsize: size_t) -> c_int;
    fn hwrite2(fp: *mut hfile, data: *const c_void, total: size_t, copied: size_t) -> ssize_t;
