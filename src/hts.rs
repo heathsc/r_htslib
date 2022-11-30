@@ -308,7 +308,7 @@ impl Hts {
         rlist
     }
 
-    pub fn reader<T>(&mut self) -> HtsReader<T> { HtsReader::new(self) }
+    pub fn reader<T: HtsRead>(&mut self) -> HtsReader<T> { HtsReader::new(self) }
 
     pub fn itr_reader<'a, 'b, T>(&'a mut self, regions: &'b [Region]) -> HtsItrReader<'a, 'b, T> { HtsItrReader::new(self, regions) }
 
@@ -616,22 +616,27 @@ pub struct HtsReader<'a, T> {
     _phantom: PhantomData<T>,
 }
 
-impl <'a, T> HtsReader<'a, T> {
+pub trait HtsIterator<T> {
+    fn read(&mut self, rec: &mut T) -> io::Result<bool>;
+    fn header(&self) -> Option<&HtsHdr>;
+}
+
+impl <'a, T: HtsRead> HtsIterator<T> for HtsReader<'a, T> {
+    fn read(&mut self, rec: &mut T) -> io::Result<bool> {
+        rec.read(self.hts)
+    }
+
+    fn header(&self) -> Option<&HtsHdr> {
+        self.hts.header()
+    }
+}
+
+impl <'a, T: HtsRead> HtsReader<'a, T> {
     pub fn new(hts: &'a mut Hts) -> Self {
         Self {
             hts,
             _phantom: PhantomData
         }
-    }
-}
-
-impl <'a, T: HtsRead> HtsReader<'a, T> {
-    pub fn read(&mut self, rec: &mut T) -> io::Result<bool> {
-        rec.read(self.hts)
-    }
-
-    pub fn header(&self) -> Option<&HtsHdr> {
-        self.hts.header()
     }
 }
 
@@ -656,10 +661,12 @@ impl <'a, 'b, T> HtsItrReader<'a, 'b, T> {
             _phantom: PhantomData
         }
     }
+
+    pub fn current_region(&self) -> Option<&Region> { self.region }
 }
 
-impl <'a, 'b, T: HtsRead> HtsItrReader<'a, 'b, T> {
-    pub fn read(&mut self, rec: &mut T) -> io::Result<bool> {
+impl <'a, 'b, T: HtsRead> HtsIterator<T> for HtsItrReader<'a, 'b, T> {
+    fn read(&mut self, rec: &mut T) -> io::Result<bool> {
         loop {
             if self.itr.is_none() {
                 if let Some(reg) = self.region_itr.next() {
@@ -678,9 +685,8 @@ impl <'a, 'b, T: HtsRead> HtsItrReader<'a, 'b, T> {
         Ok(false)
     }
 
-    pub fn current_region(&self) -> Option<&Region> { self.region }
 
-    pub fn header(&self) -> Option<&HtsHdr> {
+    fn header(&self) -> Option<&HtsHdr> {
         self.hts.header()
     }
 }
