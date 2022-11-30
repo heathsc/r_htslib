@@ -9,7 +9,7 @@ use super::{
    BGZF, BcfRec, VcfHeader
 };
 
-use crate::{get_cstr, from_cstr, hts_err, sam_hdr_t, try_from_cstr};
+use crate::{get_cstr, from_cstr, hts_err, try_from_cstr};
 
 use crate::bgzf_getline;
 
@@ -429,8 +429,8 @@ extern "C" {
    pub(crate) fn bcf_idx_save(fp: *mut htsFile) -> c_int;
    fn bcf_has_variant_types(rec: *mut bcf1_t, bitmask: u32, mode: BcfVariantMatch) -> c_int;
    fn bcf_has_variant_type(rec: *mut bcf1_t, allele: c_int, bitmask: u32) -> c_int;
-   fn bcf_get_format_values(hdr: *const bcf_hdr_t, line: *mut bcf1_t, tag: *const c_char, dst: *mut *mut c_void, ndst: *mut c_int, _type: c_int) -> c_int;
-   fn bcf_get_info_values(hdr: *const bcf_hdr_t, line: *mut bcf1_t, tag: *const c_char, dst: *mut *mut c_void, ndst: *mut c_int, _type: c_int) -> c_int;
+   // fn bcf_get_format_values(hdr: *const bcf_hdr_t, line: *mut bcf1_t, tag: *const c_char, dst: *mut *mut c_void, ndst: *mut c_int, _type: c_int) -> c_int;
+   // fn bcf_get_info_values(hdr: *const bcf_hdr_t, line: *mut bcf1_t, tag: *const c_char, dst: *mut *mut c_void, ndst: *mut c_int, _type: c_int) -> c_int;
 }
 
 pub const BCF_BT_NULL: c_int = 0;

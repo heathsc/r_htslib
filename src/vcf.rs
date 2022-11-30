@@ -158,15 +158,15 @@ impl VcfHeader {
         };
 
        NonNull::new(match req {
-            BcfHRecGet::BCF_HL_FLT(v) => get(v.as_ref(), 0),
-            BcfHRecGet::BCF_HL_INFO(v) => get(v.as_ref(), 1),
-            BcfHRecGet::BCF_HL_FMT(v) => get(v.as_ref(), 2),
-            BcfHRecGet::BCF_HL_CTG(v) => get(v.as_ref(), 3),
-            BcfHRecGet::BCF_HL_STR(v) => {
+            BcfHRecGet::BcfHlFlt(v) => get(v.as_ref(), 0),
+            BcfHRecGet::BcfHlInfo(v) => get(v.as_ref(), 1),
+            BcfHRecGet::BcfHlFmt(v) => get(v.as_ref(), 2),
+            BcfHRecGet::BcfHlCtg(v) => get(v.as_ref(), 3),
+            BcfHRecGet::BcfHlStr(v) => {
                 let v = cv(v.as_ref());
                 unsafe { bcf_hdr_get_hrec(self.as_ref(), 4, v[0].as_ptr(), v[1].as_ptr(), v[2].as_ptr()) }
             },
-            BcfHRecGet::BCF_HL_GEN(key, val) => {
+            BcfHRecGet::BcfHlGen(key, val) => {
                 if let Some(x) = val {
                     get(&[*key, *x], 5)
                 } else {
@@ -225,12 +225,12 @@ impl AsMut<bcf_hrec_t> for BcfHRec {
 }
 
 pub enum BcfHRecGet<'a> {
-    BCF_HL_FLT([&'a str; 2]),
-    BCF_HL_INFO([&'a str; 2]),
-    BCF_HL_FMT([&'a str; 2]),
-    BCF_HL_CTG([&'a str; 2]),
-    BCF_HL_STR([&'a str; 3]),
-    BCF_HL_GEN(&'a str, Option<&'a str>),
+    BcfHlFlt([&'a str; 2]),
+    BcfHlInfo([&'a str; 2]),
+    BcfHlFmt([&'a str; 2]),
+    BcfHlCtg([&'a str; 2]),
+    BcfHlStr([&'a str; 3]),
+    BcfHlGen(&'a str, Option<&'a str>),
 }
 
 pub struct BcfRec {

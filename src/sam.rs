@@ -259,6 +259,28 @@ impl BamRec {
    }
 }
 
+enum AuxType {
+   Size(usize),
+   NullTerm,
+   Array,
+   None,
+}
+
+impl AuxType {
+   fn from_u8_code(tp: u8) -> Self {
+      match tp {
+         b'A' | b'c' | b'C' => Self::Size(1),
+         b's' | b'S' => Self::Size(2),
+         b'i' | b'I' | b'f' => Self::Size(4),
+         b'd' => Self::Size(8),
+         b'Z' | b'H' => Self::NullTerm,
+         b'B' => Self::Array,
+         _ => Self::None,
+      }
+   }
+}
+
+/*
 fn aux_type2size(tp: u8) -> u8 {
    match tp {
       b'A' | b'c' | b'C' => 1,
@@ -269,51 +291,150 @@ fn aux_type2size(tp: u8) -> u8 {
       _ => 0,
    }
 }
+*/
+
+// Returns length of c-type null terminated u8 slice including the null
+// If no null is found, returns size of input slice
+fn null_term_length(p: &[u8]) -> usize {
+   for (i, c) in p.iter().enumerate() {
+      if *c == 0 {
+         return i + 1
+      }
+   }
+   p.len()
+}
+
+// Returns length of Bam aux tag value (i.e., not include the 2 character tag or the initial one character type)
+fn tag_length(p: &[u8]) -> Option<usize> {
+   let l = p.len();
+   if l < 2 {
+      None
+   } else {
+      let chk = |x| if x >= l { None } else { Some(x) };
+
+      match AuxType::from_u8_code(p[0]) {
+         AuxType::Size(x) => chk(x),
+         AuxType::NullTerm => Some(null_term_length(&p[1..])),
+         AuxType::Array => {
+            if l < 6 { None } else {
+               match AuxType::from_u8_code(p[1]) {
+                  AuxType::Size(x) => {
+                     let n =
+                         u32::from_le_bytes(p[2..6].try_into().unwrap()) as usize;
+                     chk(x * n)
+                  },
+                  _ => None,
+               }
+            }
+         }
+         AuxType::None => None,
+      }
+   }
+}
+
+pub trait BamAux<'a> {
+   fn data(&self) -> &[u8];
+
+   fn tag(&self) -> &[u8] {
+      &self.data()[..2]
+   }
+   fn val_type(&self) -> u8 {
+      self.data()[2]
+   }
+   fn value(&self) -> &[u8] {
+      &self.data()[3..]
+   }
+   fn len(&self) -> usize { self.data().len() }
+
+   fn is_empty(&self) -> bool { self.data().is_empty() }
+
+   fn as_ptr(&self) -> *const u8 {
+      self.data().as_ptr()
+   }
+}
+
+pub struct BamAuxItemMut<'a> {
+   data: &'a mut [u8],
+}
+
+impl <'a> BamAux<'a> for BamAuxItemMut<'a> {
+   fn data(&self) -> &[u8] {
+      self.data
+   }
+}
+
+impl <'a> BamAuxItemMut <'a> {
+   pub fn as_mut_ptr(&mut self) -> *mut u8 {
+      self.data.as_mut_ptr()
+   }
+}
+
+pub struct BamAuxIterMut<'a> {
+   ptr: NonNull<u8>,
+   size: usize,
+   _marker: PhantomData<&'a mut u8>
+}
+
+impl <'a> BamAuxIterMut<'a> {
+   fn new(p: *mut u8, size: usize) -> Option<Self> {
+      NonNull::new(p).map(|ptr| Self { ptr, size, _marker: PhantomData })
+   }
+}
+
+impl<'a> Iterator for BamAuxIterMut<'a> {
+   type Item = BamAuxItemMut<'a>;
+   fn next(&mut self) -> Option<Self::Item> {
+      let ln = self.size;
+      if ln < 3 {
+         None
+      } else {
+         let data = unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.size) };
+         tag_length(&data[2..]).map(|x| {
+            let p1 = self.ptr.as_ptr();
+            let l1 = x + 3;
+            let p2 = unsafe { p1.add(x + 3) };
+            assert!(ln >= x + 3);
+            self.size -= x + 3;
+            self.ptr = NonNull::new(p2).unwrap();
+            let d = unsafe { std::slice::from_raw_parts_mut(p1, l1) };
+            BamAuxItemMut{data: d}
+         })
+      }
+   }
+}
 
 pub struct BamAuxIter<'a> {
    data: &'a [u8],
 }
 
+impl <'a> BamAuxIter<'a> {
+   pub fn new(data: &'a [u8]) -> Self {
+      Self {data}
+   }
+}
+
+impl <'a> BamAux<'a> for BamAuxItem<'a> {
+   fn data(&self) -> &[u8] {
+      self.data
+   }
+}
+
+pub struct BamAuxItem<'a> {
+   data: &'a [u8],
+}
+
 impl<'a> Iterator for BamAuxIter<'a> {
-   type Item = &'a [u8];
+   type Item = BamAuxItem<'a>;
    fn next(&mut self) -> Option<Self::Item> {
       let ln = self.data.len();
       if ln < 3 {
          None
       } else {
-         let mut l = 3;
-         match aux_type2size(self.data[2]) {
-            b'Z' | b'H' => {
-               while l < ln && self.data[l] != 0 {
-                  l += 1
-               }
-               if l < ln {
-                  l += 1
-               }
-            }
-            b'B' => {
-               if ln - l < 5 {
-                  return None;
-               }
-               let sz = aux_type2size(self.data[l]) as usize;
-               let n =
-                  u32::from_le_bytes(self.data[l + 1..l + 5].try_into().unwrap()) as usize;
-               l += 5;
-               if sz == 0 {
-                  return None;
-               }
-               l += sz * n;
-            }
-            0 => return None,
-            sz => l += sz as usize,
-         }
-         if l > ln {
-            None
-         } else {
-            let (a, b) = self.data.split_at(l);
+         tag_length(&self.data[2..]).map(|x| {
+            let (a, b) = self.data.split_at(x + 3);
             self.data = b;
-            Some(a)
-         }
+            BamAuxItem{data: a}
+         })
       }
    }
 }

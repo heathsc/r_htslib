@@ -1,17 +1,17 @@
-use std::ffi::CStr;
-use std::{io, ptr};
-use std::fmt;
-use std::ops::Deref;
-use std::str::FromStr;
+use std::{
+   ffi::CStr,
+   io,
+   ptr,
+   fmt,
+   ops::Deref,
+   str::FromStr,
+};
 
 use super::{
-   check_tid, SeqQual, SamHeader, BamAuxIter,
+   check_tid, SeqQual, SamHeader, BamAuxIter, BamAuxIterMut, BamAuxItem, BamAuxItemMut, BamRec, BamAux
 };
 
-use crate::{
-   from_cstr, get_cstr, htsFile, hts_err, kstring_t, HtsFile, HtsPos,
-   hts_idx_t, hts_itr_t, BamRec
-};
+use crate::{from_cstr, get_cstr, htsFile, hts_err, kstring_t, HtsFile, HtsPos, hts_idx_t, hts_itr_t};
 
 use libc::{c_char, c_int, size_t, c_void};
 
@@ -49,6 +49,7 @@ extern "C" {
    pub(super) fn bam_copy1(bdest: *mut bam1_t, bsrc: *const bam1_t) -> *mut bam1_t;
    pub(super) fn bam_endpos(pt_: *const bam1_t) -> HtsPos;
    pub(super) fn bam_aux_update_str(pt_: *mut bam1_t, tag_: *const c_char, len_: c_int, data_: *const c_char, ) -> c_int;
+   pub(super) fn bam_aux_append(pt: *mut bam1_t, tag: *const c_char, type_: c_char, len: c_int, data: *const u8) -> c_int;
    pub(super) fn sam_read1(fp_: *mut htsFile, hd_: *mut sam_hdr_t, b_: *mut bam1_t) -> c_int;
    pub(super) fn sam_write1(fp_: *mut htsFile, hd_: *mut sam_hdr_t, b_: *const bam1_t) -> c_int;
    pub(super) fn sam_format1(hdr: *const sam_hdr_t, b: *const bam1_t, s: *mut kstring_t) -> c_int;
@@ -269,7 +270,53 @@ pub struct bam1_t {
    mempolicy: u32,
 }
 
+/// Rust representation of all fields in bam1_t data as mutable slices
+/// Note: the fields are public so that they can be accessed without function calls.
+/// In this way it is possible to use all 4 mutable references at the same time (this is
+/// safe as we assure that they do not overlap).
+pub struct BamData<'a> {
+   pub qname: &'a mut[c_char],
+   pub cigar: &'a mut[CigarElem],
+   pub seq: &'a mut[u8],
+   pub qual: &'a mut[u8],
+   pub aux: &'a mut[u8],
+}
+
 impl bam1_t {
+
+   /// Get all fields in bam1_t data as rust mutable slices allowing them to be
+   /// (more or less) safely manipulated.  This can't be done using the individual
+   /// function calls (i.e., bam1_t::get_seq_mut()) as the borrow checker will not allow more
+   /// than one mutable reference to be held from the bam1_t structure at a time.  Here we can
+   /// assure that the 4 mutable slices are non-overlapping so there is no risk of aliasing
+   pub fn bam_data(&mut self) -> Option<BamData> {
+      let mut p = self.data;
+      if p.is_null() {
+         None
+      } else {
+         let size = self.l_data as usize;
+         unsafe {
+            let end_p = p.add(size);
+            let qlen = libc::strlen(p) as usize;
+            let qname = std::slice::from_raw_parts_mut(p, qlen + 1);
+            p = p.add(self.core.l_qname as usize);
+            assert_eq!(p.align_offset(4), 0, "Cigar offset not aligned - Bam record corrupt");
+            let cigar = std::slice::from_raw_parts_mut(p as *mut CigarElem, self.core.n_cigar as usize);
+            p = p.add((self.core.n_cigar << 2) as usize);
+            let qlen = self.core.l_qseq as usize;
+            let sqlen = (qlen + 1) >> 1;
+            let seq = std::slice::from_raw_parts_mut(p as *mut u8, sqlen);
+            p = p.add(sqlen);
+            let qual = std::slice::from_raw_parts_mut(p as *mut u8, qlen);
+            p = p.add(qlen);
+            let aux_len = end_p.offset_from(p);
+            assert!(aux_len >= 0, "Corrupt BAM record");
+            let aux = std::slice::from_raw_parts_mut(p as *mut u8, aux_len as usize);
+            Some(BamData{qname, cigar, seq, qual, aux})
+         }
+      }
+   }
+
    pub fn qname_cstr(&self) -> Option<&CStr> {
       if self.data.is_null() {
          None
@@ -411,8 +458,9 @@ impl bam1_t {
       if len > 0 {
          assert!(!self.data.is_null());
          let slice = unsafe {
-            let ptr: *const CigarElem = self.data.offset(self.core.l_qname as isize).cast();
-            std::slice::from_raw_parts(ptr, len)
+            let ptr = self.data.offset(self.core.l_qname as isize);
+            assert_eq!(ptr.align_offset(4), 0, "Cigar storage not aligned - Bam record corrupt");
+            std::slice::from_raw_parts(ptr.cast::<CigarElem>(), len)
          };
          Some(Cigar(slice))
       } else {
@@ -457,7 +505,7 @@ impl bam1_t {
       }
    }
 
-   pub fn get_aux(&self) -> Option<&[u8]> {
+   pub fn get_aux_as_parts(&self) -> Option<(*mut u8, usize)> {
       if self.data.is_null() {
          None
       } else {
@@ -467,29 +515,83 @@ impl bam1_t {
             let p = self.data.offset(off) as *mut u8;
             let size = self.l_data as isize - off;
             assert!(size >= 0, "Invalid BAM aux size");
-            Some(std::slice::from_raw_parts(p, size as usize))
+            Some((p, size as usize))
          }
       }
+   }
+
+   pub fn get_aux(&self) -> Option<&[u8]> {
+      self.get_aux_as_parts().map(|(p, sz)| {
+         unsafe { std::slice::from_raw_parts(p, sz) }
+      })
    }
 
    pub fn get_aux_iter(&self) -> Option<BamAuxIter> {
       self.get_aux().map(|aux| BamAuxIter { data: aux })
    }
 
-   pub fn get_tag(&self, tag_id: &str, tag_type: char) -> Option<&[u8]> {
-      if tag_id.len() != 2 {
-         return None;
+   pub fn get_aux_iter_mut(&mut self) -> Option<BamAuxIterMut> {
+      self.get_aux_as_parts().and_then(|(p, sz)| BamAuxIterMut::new(p, sz))
+   }
+
+   pub fn get_tag(&self, tag_id: &str) -> Option<BamAuxItem> {
+      self.get_aux_iter().and_then(|a| find_tag(a, tag_id))
+   }
+
+   pub fn get_tag_mut(&mut self, tag_id: &str) -> Option<BamAuxItemMut> {
+      self.get_aux_iter_mut().and_then(|a| find_tag(a, tag_id))
+   }
+
+   /// Delete Aux tag from bam record where we already have the pointer to the start of the tag
+   /// entry within the record and the size of the entry.  It is much safer to use del_tag(), but
+   /// this function avoids searching through the tags if the position is already known.
+   ///
+   /// # Safety
+   ///
+   /// The supplied ptr and sz arguments must correspond to the start and size of an aux tag in self
+   /// otherwise behaviour is undefined (although there are many sanity checks in place. i.e., we
+   /// check that the given region lies entirely within the aux data area, but we don't check that
+   /// p and sz correspond to a true starting position and size of a tag).
+   pub unsafe fn del_tag_from_ptr(&mut self, p: *mut u8, sz: usize)  {
+     let (aux_ptr, size) = self.get_aux_as_parts().expect("Empty bam rec");
+      let size = size as isize;
+      let isz = sz as isize;
+      let x = p.offset_from(aux_ptr) + isz;
+      assert!(x <= size && x >= isz);
+      if x < size {
+         libc::memmove(p as *mut c_void, p.add(sz) as *const c_void, (size - x) as size_t);
       }
-      let tag_id = tag_id.as_bytes();
-      if let Some(itr) = self.get_aux_iter() {
-         for tag in itr {
-            if tag[0] == tag_id[0] && tag[1] == tag_id[1] && tag[2] == (tag_type as u8) {
-               return Some(&tag[3..]);
-            }
+      self.l_data -= sz as c_int;
+   }
+
+   pub fn del_tag(&mut self, tag_id: &str) -> io::Result<bool> {
+
+      if let Some(a) = self.get_aux_iter_mut() {
+         if let Some((p, sz)) = find_tag(a, tag_id).map(|mut t| {
+            (t.as_mut_ptr(), t.len())
+         }) {
+            unsafe { self.del_tag_from_ptr(p, sz) }
+            return Ok(false)
          }
       }
-      None
+      Ok(true)
    }
+
+   pub fn add_tag(&mut self, tag_id: &str, tag_type: char, data: &[u8]) -> io::Result<()> {
+      if tag_id.len() != 2 {
+         Err(hts_err("Bad tag length in add_tag()".to_string()))
+      } else {
+         let r = unsafe {
+            bam_aux_append(self, tag_id.as_ptr() as *const c_char, tag_type as c_char, data.len() as c_int, data.as_ptr())
+         };
+         if r == 0 {
+            Ok(())
+         } else {
+            Err(hts_err("Out of memory in add_tag()".to_string()))
+         }
+      }
+   }
+
    pub fn get_seq_qual(&self) -> io::Result<SeqQual> {
       let seq = self
          .get_seq()
@@ -514,6 +616,24 @@ impl bam1_t {
    pub fn format(&mut self, hdr: &SamHeader, s: &mut kstring_t) -> c_int {
       unsafe { sam_format1(hdr.as_ref(), self, s) }
    }
+}
+
+fn find_tag<'a, I, T>(a: I, s: &str) -> Option<T>
+where
+    I: Iterator<Item = T>,
+    T: BamAux<'a>
+{
+   let tag_id = s.as_bytes();
+   if tag_id.len() != 2 {
+      return None;
+   }
+   for tag in a {
+      let tg = tag.tag();
+      if tg[0] == tag_id[0] && tg[1] == tag_id[1] {
+         return Some(tag);
+      }
+   }
+   None
 }
 
 const SEQ_DECODE: [(u8, u8); 256] = [
@@ -571,7 +691,7 @@ impl fmt::Display for CigarOp {
             CigarOp::Pad => 'P',
             CigarOp::Equal => '=',
             CigarOp::Diff => 'X',
-            CigarOp::Back => 'D',
+            CigarOp::Back => 'B',
             CigarOp::Overlap => 'O',
             _ => '?',
          }

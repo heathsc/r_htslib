@@ -1,6 +1,6 @@
 [package]
 name = "r_htslib"
-version = "0.12.0"
+version = "0.13.0"
 authors = ["Simon Heath <simon.heath@gmail.com>"]
 edition = "2021"
 

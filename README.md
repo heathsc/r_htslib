@@ -3,6 +3,7 @@ Lightweight wrapper around htslib for access to SAM/BAM/CRAM/BCF/VCF files.
 
 Changes
 
+ - 0.13.0. Add functions to allow/make easier mutable access to the data sections of bam1_t records 
  - 0.12.0. Remove the mmalloc function as they are superseded and safer options are available
  - 0.11.0. Add many new functions in vcf from gemBS-rs.  Also breaking change to Hts::open where now the file parameter is an Option<>
  - 0.10.2. Add several accessor functions to Hts:: and HtsHdr:: so that the underlying SAM/VCF headers do not need to be directly accessed
