@@ -1,6 +1,6 @@
 [package]
 name = "r_htslib"
-version = "0.13.0"
+version = "0.14.0"
 authors = ["Simon Heath <simon.heath@gmail.com>"]
 edition = "2021"
 
@@ -11,3 +11,4 @@ libc = "~0.2"
 c2rust-bitfields = "~0.3"
 regex = "~1.7"
 lazy_static = "~1.4"
+anyhow = "~1"

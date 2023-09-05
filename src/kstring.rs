@@ -1,5 +1,5 @@
-use std::ptr::NonNull;
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 
 use super::*;
 use libc::{c_char, c_float, c_int, c_void, size_t};
@@ -10,7 +10,7 @@ pub struct kstring_t {
     l: size_t,
     m: size_t,
     s: Option<NonNull<c_char>>,
-    phantom: PhantomData<kstring_t>,
+    phantom: PhantomData<c_char>,
 }
 
 impl Default for kstring_t {
@@ -40,11 +40,17 @@ extern "C" {
 }
 
 impl kstring_t {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn len(&self) -> size_t { self.l }
+    pub fn len(&self) -> size_t {
+        self.l
+    }
 
-    pub fn clear(&mut self) { self.l = 0 }
+    pub fn clear(&mut self) {
+        self.l = 0
+    }
 
     pub fn resize(&mut self, size: size_t) -> bool {
         if self.m < size {
@@ -57,8 +63,11 @@ impl kstring_t {
                 unsafe { libc::realloc(ptr.as_ptr() as *mut c_void, size) }
             } else {
                 unsafe { libc::malloc(size) }
-            }).map(|x| x.cast::<c_char>());
-            if p.is_none() { return true }
+            })
+            .map(|x| x.cast::<c_char>());
+            if p.is_none() {
+                return true;
+            }
             self.s = p;
             self.m = size;
         }
@@ -149,20 +158,22 @@ impl kstring_t {
         self.s.map(|s| from_cstr(s.as_ptr()).trim_end())
     }
     pub fn to_cstr(&self) -> Option<&CStr> {
-        self.s.map(|s| unsafe { CStr::from_ptr(s.as_ptr())})
+        self.s.map(|s| unsafe { CStr::from_ptr(s.as_ptr()) })
     }
-    pub fn as_ptr(&self) -> Option<NonNull<c_char>> { self.s }
+    pub fn as_ptr(&self) -> Option<NonNull<c_char>> {
+        self.s
+    }
 
     pub fn as_slice(&self, inc_zero: bool) -> Option<&[u8]> {
         self.s.map(|s| {
             let p = s.as_ptr() as *const u8;
-            unsafe {std::slice::from_raw_parts(p, if inc_zero { self.l +  1 } else { self.l })}
+            unsafe { std::slice::from_raw_parts(p, if inc_zero { self.l + 1 } else { self.l }) }
         })
     }
     pub fn as_slice_mut(&mut self, inc_zero: bool) -> Option<&mut [u8]> {
         self.s.map(|s| {
             let p = s.as_ptr() as *mut u8;
-            unsafe {std::slice::from_raw_parts_mut(p, if inc_zero { self.l +  1 } else { self.l })}
+            unsafe { std::slice::from_raw_parts_mut(p, if inc_zero { self.l + 1 } else { self.l }) }
         })
     }
 }

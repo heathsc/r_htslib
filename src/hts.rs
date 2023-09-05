@@ -1,23 +1,24 @@
 pub mod lib;
 pub use lib::*;
 
-use libc::{c_void, c_int, size_t};
+use libc::{c_int, c_void, size_t};
 
 use std::{
-    io:: {self, Write},
-    marker::PhantomData,
-    ptr::{null, NonNull},
-    ops::{Deref, DerefMut},
-    ffi::{CStr, CString},
     cmp::Ordering,
-    path::{Path, PathBuf},
+    ffi::{CStr, CString},
+    io::{self, Write},
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
     os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+    ptr::{null, NonNull},
 };
 
 use crate::{
-    tbx_index_load3, VcfHeader, SamHeader, Tbx, vcf_read_itr, bcf_read_itr, tbx_read_itr, tbx_name2id,
-    sam_itr_queryi, sam_hdr_t, bam_name2id, BamRec, BcfRec, TbxRec, bcf_hdr_name2id,
-    get_cstr, hts_err, bcf_hdr_t, tbx_t, BCF_DT_CTG, bcf_idx_init, bcf_idx_save, sam_idx_init, sam_idx_save
+    bam_name2id, bcf_hdr_name2id, bcf_hdr_t, bcf_idx_init, bcf_idx_save, bcf_read_itr, get_cstr,
+    hts_err, sam_hdr_t, sam_idx_init, sam_idx_save, sam_itr_queryi, tbx_index_load3, tbx_name2id,
+    tbx_read_itr, tbx_t, vcf_read_itr, BamRec, BcfRec, SamHeader, Tbx, TbxRec, VcfHeader,
+    BCF_DT_CTG,
 };
 
 pub struct Hts {
@@ -32,32 +33,46 @@ unsafe impl Sync for Hts {}
 
 impl Hts {
     pub fn open<P>(name: Option<P>, mode: &str) -> io::Result<Self>
-        where
-            P: AsRef<Path>,
+    where
+        P: AsRef<Path>,
     {
         Self::open_format_(name, mode, None)
     }
 
     pub fn open_format<P>(name: Option<P>, mode: &str, fmt: &HtsFormat) -> io::Result<Self>
-        where
-            P: AsRef<Path>,
+    where
+        P: AsRef<Path>,
     {
         Self::open_format_(name, mode, Some(fmt))
     }
 
     fn open_format_<P>(name: Option<P>, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self>
-        where
-            P: AsRef<Path>,
+    where
+        P: AsRef<Path>,
     {
-        let name = name.map(|p| p.as_ref().to_owned()).unwrap_or_else(|| PathBuf::from("-"));
+        let name = name
+            .map(|p| p.as_ref().to_owned())
+            .unwrap_or_else(|| PathBuf::from("-"));
         let mut fp = HtsFile::open_format_(&name, mode, fmt)?;
         let (header, tbx) = if fp.as_ref().is_write() == 0 {
             match fp.format().format {
-                htsExactFormat::Sam | htsExactFormat::Bam | htsExactFormat::Cram => (Some(HtsHdr::Sam(SamHeader::read(&mut fp)?)), None),
-                htsExactFormat::Bcf | htsExactFormat::Vcf => (Some(HtsHdr::Vcf(VcfHeader::read(&mut fp)?)), None),
-                _ => if let Ok(tbx) = Tbx::load(&name) { (None, Some(tbx)) } else { (None, None) }
+                htsExactFormat::Sam | htsExactFormat::Bam | htsExactFormat::Cram => {
+                    (Some(HtsHdr::Sam(SamHeader::read(&mut fp)?)), None)
+                }
+                htsExactFormat::Bcf | htsExactFormat::Vcf => {
+                    (Some(HtsHdr::Vcf(VcfHeader::read(&mut fp)?)), None)
+                }
+                _ => {
+                    if let Ok(tbx) = Tbx::load(&name) {
+                        (None, Some(tbx))
+                    } else {
+                        (None, None)
+                    }
+                }
             }
-        } else { (None, None) };
+        } else {
+            (None, None)
+        };
 
         Ok(Self {
             hts_file: fp,
@@ -71,19 +86,30 @@ impl Hts {
         self.header = hdr
     }
 
-    pub fn header(&self) -> Option<&HtsHdr> { self.header.as_ref() }
+    pub fn header(&self) -> Option<&HtsHdr> {
+        self.header.as_ref()
+    }
 
-    pub fn header_mut(&mut self) -> Option<&mut HtsHdr> { self.header.as_mut() }
+    pub fn header_mut(&mut self) -> Option<&mut HtsHdr> {
+        self.header.as_mut()
+    }
 
     pub fn seq_names(&self) -> Vec<&str> {
-        if let Some(h) = self.header.as_ref() { h.seq_names() }
-        else if let Some(t) = self.tbx.as_ref() { t.seq_names() }
-        else { Vec::new() }
+        if let Some(h) = self.header.as_ref() {
+            h.seq_names()
+        } else if let Some(t) = self.tbx.as_ref() {
+            t.seq_names()
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn seq_lengths(&self) -> Vec<usize> {
-        if let Some(h) = self.header.as_ref() { h.seq_lengths() }
-        else { Vec::new() }
+        if let Some(h) = self.header.as_ref() {
+            h.seq_lengths()
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn seq_length(&self, ctg: &str) -> Option<usize> {
@@ -98,13 +124,21 @@ impl Hts {
         self.header.as_ref().map(|h| h.n_ref())
     }
 
-    pub fn tbx(&self) -> Option<&Tbx> { self.tbx.as_ref() }
+    pub fn tbx(&self) -> Option<&Tbx> {
+        self.tbx.as_ref()
+    }
 
-    pub fn tbx_mut(&mut self) -> Option<&mut Tbx> { self.tbx.as_mut() }
+    pub fn tbx_mut(&mut self) -> Option<&mut Tbx> {
+        self.tbx.as_mut()
+    }
 
-    pub fn hts_file_mut(&mut self) -> &mut HtsFile { &mut self.hts_file }
+    pub fn hts_file_mut(&mut self) -> &mut HtsFile {
+        &mut self.hts_file
+    }
 
-    pub fn hts_file(&self) -> &HtsFile { &self.hts_file }
+    pub fn hts_file(&self) -> &HtsFile {
+        &self.hts_file
+    }
 
     pub fn hts_file_and_header(&mut self) -> (&mut HtsFile, Option<&mut HtsHdr>) {
         (&mut self.hts_file, self.header.as_mut())
@@ -122,7 +156,9 @@ impl Hts {
         self.index_load3(fnidx, 0)
     }
 
-    pub fn name(&self) -> &str { self.hts_file.name() }
+    pub fn name(&self) -> &str {
+        self.hts_file.name()
+    }
 
     pub fn has_index(&self) -> bool {
         self.idx.is_some() || self.tbx.is_some()
@@ -139,76 +175,122 @@ impl Hts {
         };
 
         let mk_hts_idx = |p: *mut hts_idx_t| {
-            NonNull::new(p).map(|q| HtsIndex { inner: q, phantom: PhantomData})
+            NonNull::new(p).map(|q| HtsIndex {
+                inner: q,
+                phantom: PhantomData,
+            })
         };
 
         let idx = match self.hts_file.format().format {
             htsExactFormat::Bam | htsExactFormat::Cram => {
-                self.idx = mk_hts_idx(unsafe { sam_index_load3(self.hts_file.as_mut(), fname, fnidx_ptr, flags) });
+                self.idx = mk_hts_idx(unsafe {
+                    sam_index_load3(self.hts_file.as_mut(), fname, fnidx_ptr, flags)
+                });
                 self.idx.is_some()
-            },
+            }
             htsExactFormat::Sam => {
-                self.idx = mk_hts_idx(unsafe { sam_index_load3(self.hts_file.as_mut(), fname, fnidx_ptr, flags) });
+                self.idx = mk_hts_idx(unsafe {
+                    sam_index_load3(self.hts_file.as_mut(), fname, fnidx_ptr, flags)
+                });
                 self.idx.is_some() || {
-                    if let Some(q) = NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) }) {
+                    if let Some(q) =
+                        NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) })
+                    {
                         self.tbx = Some(Tbx::new(q));
                         true
-                    } else { false }
+                    } else {
+                        false
+                    }
                 }
-            },
+            }
             htsExactFormat::Bcf => {
-                self.idx = mk_hts_idx(unsafe { hts_idx_load3(fname, fnidx_ptr, HTS_FMT_CSI, flags)});
+                self.idx =
+                    mk_hts_idx(unsafe { hts_idx_load3(fname, fnidx_ptr, HTS_FMT_CSI, flags) });
                 self.idx.is_some()
-            },
+            }
             htsExactFormat::Vcf => {
-                self.idx = mk_hts_idx(unsafe { hts_idx_load3(fname, fnidx_ptr, HTS_FMT_CSI, flags)});
+                self.idx =
+                    mk_hts_idx(unsafe { hts_idx_load3(fname, fnidx_ptr, HTS_FMT_CSI, flags) });
                 self.idx.is_some() || {
-                    if let Some(q) = NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) }) {
+                    if let Some(q) =
+                        NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) })
+                    {
                         self.tbx = Some(Tbx::new(q));
                         true
-                    } else { false }
+                    } else {
+                        false
+                    }
                 }
-            },
+            }
             _ => {
                 // Retry to load index for Tabix file if we have been supplied with an index name
                 if have_fnidx {
-                    if let Some(q) = NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) }) {
+                    if let Some(q) =
+                        NonNull::new(unsafe { tbx_index_load3(fname, fnidx_ptr, flags) })
+                    {
                         self.tbx = Some(Tbx::new(q));
                     }
                 }
                 self.tbx.is_some()
             }
         };
-        if idx { Ok(()) } else { Err(hts_err(format!("Failed to load index for file {}", self.name()))) }
+        if idx {
+            Ok(())
+        } else {
+            Err(hts_err(format!(
+                "Failed to load index for file {}",
+                self.name()
+            )))
+        }
     }
 
     pub fn index(&self) -> Option<&hts_idx_t> {
         if self.has_index() {
             self.idx.as_ref().map_or_else(
                 || self.tbx.as_ref().map(|tbx| tbx.idx()),
-                |p| Some(p.as_ref()))
-        } else { None }
+                |p| Some(p.as_ref()),
+            )
+        } else {
+            None
+        }
     }
 
     pub fn idx_init(&mut self, min_shift: isize, fnidx: &CStr) -> io::Result<()> {
         let (hts_file, hdr) = self.hts_file_and_header();
         if let Some(h) = hdr {
             let ret = match h {
-                HtsHdr::Vcf(h) => unsafe { bcf_idx_init(hts_file.as_mut(), h.as_ref(), min_shift as c_int, fnidx.as_ptr())}
-                HtsHdr::Sam(h) => unsafe { sam_idx_init(hts_file.as_mut(), h.as_ref(), min_shift as c_int, fnidx.as_ptr())}
+                HtsHdr::Vcf(h) => unsafe {
+                    bcf_idx_init(
+                        hts_file.as_mut(),
+                        h.as_ref(),
+                        min_shift as c_int,
+                        fnidx.as_ptr(),
+                    )
+                },
+                HtsHdr::Sam(h) => unsafe {
+                    sam_idx_init(
+                        hts_file.as_mut(),
+                        h.as_ref(),
+                        min_shift as c_int,
+                        fnidx.as_ptr(),
+                    )
+                },
             };
             if ret == 0 {
-                return Ok(())
+                return Ok(());
             }
         }
-        Err(hts_err(format!("Failed to initialize index {:?} - wrong file type", fnidx)))
+        Err(hts_err(format!(
+            "Failed to initialize index {:?} - wrong file type",
+            fnidx
+        )))
     }
 
     pub fn idx_save(&mut self) -> io::Result<()> {
         let hts_file = &mut self.hts_file;
         let ret = match hts_file.format().format {
             htsExactFormat::Vcf | htsExactFormat::Bcf => unsafe { bcf_idx_save(hts_file.as_mut()) },
-            _ => unsafe {sam_idx_save(hts_file.as_mut())}
+            _ => unsafe { sam_idx_save(hts_file.as_mut()) },
         };
         if ret == 0 {
             Ok(())
@@ -218,7 +300,9 @@ impl Hts {
     }
 
     pub fn rec_type(&self) -> Option<HtsRecType> {
-        if self.tbx.is_some() { Some(HtsRecType::Tbx) } else {
+        if self.tbx.is_some() {
+            Some(HtsRecType::Tbx)
+        } else {
             self.header().map(|h| match h {
                 HtsHdr::Sam(_) => HtsRecType::Sam,
                 HtsHdr::Vcf(_) => HtsRecType::Vcf,
@@ -227,20 +311,41 @@ impl Hts {
     }
 
     pub fn itr_query(&mut self, region: &Region) -> io::Result<HtsItr> {
-        if !self.has_index() { self.index_load()? }
-        let idx= self.index().unwrap();
+        if !self.has_index() {
+            self.index_load()?
+        }
+        let idx = self.index().unwrap();
         let hdr = self.header.as_ref();
 
         if let Some(itr) = NonNull::new(match (hdr, self.tbx.as_ref()) {
-            (_, Some(_)) => unsafe { hts_itr_query(idx, region.tid, region.begin, region.end, tbx_read_itr) },
-            (Some(HtsHdr::Sam(_)), _) => unsafe { sam_itr_queryi(idx, region.tid, region.begin, region.end) },
-            (Some(HtsHdr::Vcf(_)), _) if matches!(self.hts_file.format().format, htsExactFormat::Bcf) => unsafe { hts_itr_query(idx, region.tid, region.begin, region.end, bcf_read_itr) },
-            (Some(HtsHdr::Vcf(_)), _) => unsafe { hts_itr_query(idx, region.tid, region.begin, region.end, vcf_read_itr) },
-            (None, None) => return Err(hts_err(format!("Error making iterator for file {}", self.name()))),
+            (_, Some(_)) => unsafe {
+                hts_itr_query(idx, region.tid, region.begin, region.end, tbx_read_itr)
+            },
+            (Some(HtsHdr::Sam(_)), _) => unsafe {
+                sam_itr_queryi(idx, region.tid, region.begin, region.end)
+            },
+            (Some(HtsHdr::Vcf(_)), _)
+                if matches!(self.hts_file.format().format, htsExactFormat::Bcf) =>
+            unsafe { hts_itr_query(idx, region.tid, region.begin, region.end, bcf_read_itr) },
+            (Some(HtsHdr::Vcf(_)), _) => unsafe {
+                hts_itr_query(idx, region.tid, region.begin, region.end, vcf_read_itr)
+            },
+            (None, None) => {
+                return Err(hts_err(format!(
+                    "Error making iterator for file {}",
+                    self.name()
+                )))
+            }
         }) {
-            Ok(HtsItr { inner: itr, phantom: PhantomData })
+            Ok(HtsItr {
+                inner: itr,
+                phantom: PhantomData,
+            })
         } else {
-            Err(hts_err(format!("Error making iterator for file {}", self.name())))
+            Err(hts_err(format!(
+                "Error making iterator for file {}",
+                self.name()
+            )))
         }
     }
 
@@ -249,15 +354,15 @@ impl Hts {
             [b'.'] => {
                 let region = Region::make(HTS_IDX_START, 0, 0);
                 self.itr_query(&region)
-            },
+            }
             [b'*'] => {
                 let region = Region::make(HTS_IDX_NOCOOR, 0, 0);
                 self.itr_query(&region)
-            },
+            }
             _ => {
                 let region = self.parse_region(reg)?;
                 self.itr_query(&region)
-            },
+            }
         }
     }
 
@@ -268,9 +373,16 @@ impl Hts {
         } else {
             // VCF/BCF or SAM/BAM/CRAM files
             match self.header_mut() {
-                Some(HtsHdr::Vcf(h)) => (bcf_hdr_name2id, h.as_mut() as *mut bcf_hdr_t as *mut c_void),
+                Some(HtsHdr::Vcf(h)) => {
+                    (bcf_hdr_name2id, h.as_mut() as *mut bcf_hdr_t as *mut c_void)
+                }
                 Some(HtsHdr::Sam(h)) => (bam_name2id, h.as_mut() as *mut sam_hdr_t as *mut c_void),
-                _ => return Err(hts_err(format!("Error making iterator for file {}", self.name()))),
+                _ => {
+                    return Err(hts_err(format!(
+                        "Error making iterator for file {}",
+                        self.name()
+                    )))
+                }
             }
         })
     }
@@ -279,8 +391,20 @@ impl Hts {
         let mut region = Region::new();
 
         if unsafe {
-            hts_parse_region(reg.as_ptr(), &mut region.tid, &mut region.begin, &mut region.end, get_id, hdr, HTS_PARSE_THOUSANDS_SEP)
-        }.is_null() { return Err(hts_err(format!("Error parsing region {:?}", reg))) }
+            hts_parse_region(
+                reg.as_ptr(),
+                &mut region.tid,
+                &mut region.begin,
+                &mut region.end,
+                get_id,
+                hdr,
+                HTS_PARSE_THOUSANDS_SEP,
+            )
+        }
+        .is_null()
+        {
+            return Err(hts_err(format!("Error parsing region {:?}", reg)));
+        }
 
         Ok(region)
     }
@@ -308,16 +432,24 @@ impl Hts {
         rlist
     }
 
-    pub fn reader<T: HtsRead>(&mut self) -> HtsReader<T> { HtsReader::new(self) }
+    pub fn reader<T: HtsRead>(&mut self) -> HtsReader<T> {
+        HtsReader::new(self)
+    }
 
-    pub fn itr_reader<'a, 'b, T>(&'a mut self, regions: &'b [Region]) -> HtsItrReader<'a, 'b, T> { HtsItrReader::new(self, regions) }
+    pub fn itr_reader<'a, 'b, T>(&'a mut self, regions: &'b [Region]) -> HtsItrReader<'a, 'b, T> {
+        HtsItrReader::new(self, regions)
+    }
 
-    pub fn writer(&mut self) -> io::Result<Writer> { Writer::new(&mut self.hts_file) }
+    pub fn writer(&mut self) -> io::Result<Writer> {
+        Writer::new(&mut self.hts_file)
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum HtsRecType {
-    Sam, Vcf, Tbx
+    Sam,
+    Vcf,
+    Tbx,
 }
 
 pub enum HtsRec {
@@ -337,22 +469,30 @@ unsafe impl Sync for HtsFile {}
 impl Deref for HtsFile {
     type Target = htsFile;
     #[inline]
-    fn deref(&self) -> &htsFile { unsafe{self.inner.as_ref()} }
+    fn deref(&self) -> &htsFile {
+        unsafe { self.inner.as_ref() }
+    }
 }
 
 impl DerefMut for HtsFile {
     #[inline]
-    fn deref_mut(&mut self) -> &mut htsFile {unsafe{ self.inner.as_mut() }}
+    fn deref_mut(&mut self) -> &mut htsFile {
+        unsafe { self.inner.as_mut() }
+    }
 }
 
 impl AsRef<htsFile> for HtsFile {
     #[inline]
-    fn as_ref(&self) -> &htsFile { self}
+    fn as_ref(&self) -> &htsFile {
+        self
+    }
 }
 
 impl AsMut<htsFile> for HtsFile {
     #[inline]
-    fn as_mut(&mut self) -> &mut htsFile { self}
+    fn as_mut(&mut self) -> &mut htsFile {
+        self
+    }
 }
 
 impl Drop for HtsFile {
@@ -375,7 +515,11 @@ impl HtsFile {
         Self::open_format_(name, mode, Some(fmt))
     }
 
-    fn open_format_<S: AsRef<Path>>(name: S, mode: &str, fmt: Option<&HtsFormat>) -> io::Result<Self> {
+    fn open_format_<S: AsRef<Path>>(
+        name: S,
+        mode: &str,
+        fmt: Option<&HtsFormat>,
+    ) -> io::Result<Self> {
         let name = name.as_ref();
         let mode = get_cstr(mode);
         let fmt = match fmt {
@@ -383,8 +527,10 @@ impl HtsFile {
             None => null(),
         };
         let cname = CString::new(name.as_os_str().as_bytes()).unwrap();
-        if let Some(hfile) = NonNull::new(unsafe { hts_open_format(cname.as_ptr(), mode.as_ptr(), fmt) }) {
-            assert!(!unsafe {hfile.as_ref()}.fn_.is_null());
+        if let Some(hfile) =
+            NonNull::new(unsafe { hts_open_format(cname.as_ptr(), mode.as_ptr(), fmt) })
+        {
+            assert!(!unsafe { hfile.as_ref() }.fn_.is_null());
             let hfile = hfile.cast::<htsFile>();
             Ok(HtsFile {
                 inner: hfile,
@@ -396,14 +542,19 @@ impl HtsFile {
     }
 
     pub fn set_thread_pool(&mut self, tp: &HtsThreadPool) -> io::Result<()> {
-        if unsafe{hts_set_thread_pool(self.as_mut(), tp)} == 0 {
+        if unsafe { hts_set_thread_pool(self.as_mut(), tp) } == 0 {
             Ok(())
         } else {
-            Err(hts_err(format!("Failed to set thread pool for file {}", self.name())))
+            Err(hts_err(format!(
+                "Failed to set thread pool for file {}",
+                self.name()
+            )))
         }
     }
 
-    pub fn writer(&mut self) -> io::Result<Writer> { Writer::new(self) }
+    pub fn writer(&mut self) -> io::Result<Writer> {
+        Writer::new(self)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -462,18 +613,17 @@ unsafe impl Sync for HtsThreadPool {}
 
 impl Drop for HtsThreadPool {
     fn drop(&mut self) {
-        unsafe { hts_tpool_destroy(self.inner.as_ptr() ) }
+        unsafe { hts_tpool_destroy(self.inner.as_ptr()) }
     }
 }
 
 impl HtsThreadPool {
     pub fn new(nthreads: usize) -> Option<Self> {
-        NonNull::new(unsafe {hts_tpool_init(nthreads as c_int)})
-           .map(|tpool| Self {
-                inner: tpool,
-                qsize: 0,
-                phantom: PhantomData,
-            })
+        NonNull::new(unsafe { hts_tpool_init(nthreads as c_int) }).map(|tpool| Self {
+            inner: tpool,
+            qsize: 0,
+            phantom: PhantomData,
+        })
     }
 }
 
@@ -488,27 +638,35 @@ unsafe impl Sync for HtsIndex {}
 impl Deref for HtsIndex {
     type Target = hts_idx_t;
     #[inline]
-    fn deref(&self) -> &hts_idx_t { unsafe{self.inner.as_ref()} }
+    fn deref(&self) -> &hts_idx_t {
+        unsafe { self.inner.as_ref() }
+    }
 }
 
 impl DerefMut for HtsIndex {
     #[inline]
-    fn deref_mut(&mut self) -> &mut hts_idx_t {unsafe{ self.inner.as_mut() }}
+    fn deref_mut(&mut self) -> &mut hts_idx_t {
+        unsafe { self.inner.as_mut() }
+    }
 }
 
 impl AsRef<hts_idx_t> for HtsIndex {
     #[inline]
-    fn as_ref(&self) -> &hts_idx_t { self}
+    fn as_ref(&self) -> &hts_idx_t {
+        self
+    }
 }
 
 impl AsMut<hts_idx_t> for HtsIndex {
     #[inline]
-    fn as_mut(&mut self) -> &mut hts_idx_t { self}
+    fn as_mut(&mut self) -> &mut hts_idx_t {
+        self
+    }
 }
 
 impl Drop for HtsIndex {
     fn drop(&mut self) {
-        unsafe{ hts_idx_destroy(self.as_mut()) }
+        unsafe { hts_idx_destroy(self.as_mut()) }
     }
 }
 
@@ -578,22 +736,30 @@ pub struct HtsItr {
 impl Deref for HtsItr {
     type Target = hts_itr_t;
     #[inline]
-    fn deref(&self) -> &hts_itr_t { unsafe{self.inner.as_ref()} }
+    fn deref(&self) -> &hts_itr_t {
+        unsafe { self.inner.as_ref() }
+    }
 }
 
 impl DerefMut for HtsItr {
     #[inline]
-    fn deref_mut(&mut self) -> &mut hts_itr_t {unsafe{ self.inner.as_mut() }}
+    fn deref_mut(&mut self) -> &mut hts_itr_t {
+        unsafe { self.inner.as_mut() }
+    }
 }
 
 impl AsRef<hts_itr_t> for HtsItr {
     #[inline]
-    fn as_ref(&self) -> &hts_itr_t { self}
+    fn as_ref(&self) -> &hts_itr_t {
+        self
+    }
 }
 
 impl AsMut<hts_itr_t> for HtsItr {
     #[inline]
-    fn as_mut(&mut self) -> &mut hts_itr_t { self}
+    fn as_mut(&mut self) -> &mut hts_itr_t {
+        self
+    }
 }
 
 impl Drop for HtsItr {
@@ -621,7 +787,7 @@ pub trait HtsIterator<T> {
     fn header(&self) -> Option<&HtsHdr>;
 }
 
-impl <'a, T: HtsRead> HtsIterator<T> for HtsReader<'a, T> {
+impl<'a, T: HtsRead> HtsIterator<T> for HtsReader<'a, T> {
     fn read(&mut self, rec: &mut T) -> io::Result<bool> {
         rec.read(self.hts)
     }
@@ -631,17 +797,16 @@ impl <'a, T: HtsRead> HtsIterator<T> for HtsReader<'a, T> {
     }
 }
 
-impl <'a, T: HtsRead> HtsReader<'a, T> {
+impl<'a, T: HtsRead> HtsReader<'a, T> {
     pub fn new(hts: &'a mut Hts) -> Self {
         Self {
             hts,
-            _phantom: PhantomData
+            _phantom: PhantomData,
         }
     }
 }
 
-pub struct HtsItrReader<'a, 'b, T>
-{
+pub struct HtsItrReader<'a, 'b, T> {
     hts: &'a mut Hts,
     region_itr: std::slice::Iter<'b, Region>,
     itr: Option<HtsItr>,
@@ -649,23 +814,27 @@ pub struct HtsItrReader<'a, 'b, T>
     _phantom: PhantomData<T>,
 }
 
-impl <'a, 'b, T> HtsItrReader<'a, 'b, T> {
-    pub fn new(hts: &'a mut Hts, regions: &'b [Region]) -> Self
-    {
+impl<'a, 'b, T> HtsItrReader<'a, 'b, T> {
+    pub fn new(hts: &'a mut Hts, regions: &'b [Region]) -> Self {
         let region_itr = regions.into_iter();
         Self {
             hts,
             region_itr,
             itr: None,
             region: None,
-            _phantom: PhantomData
+            _phantom: PhantomData,
         }
     }
 
-    pub fn current_region(&self) -> Option<&Region> { self.region }
+    pub fn current_region(&self) -> Option<&Region> {
+        self.region
+    }
+    pub fn hts(&mut self) -> &mut Hts {
+        self.hts
+    }
 }
 
-impl <'a, 'b, T: HtsRead> HtsIterator<T> for HtsItrReader<'a, 'b, T> {
+impl<'a, 'b, T: HtsRead> HtsIterator<T> for HtsItrReader<'a, 'b, T> {
     fn read(&mut self, rec: &mut T) -> io::Result<bool> {
         loop {
             if self.itr.is_none() {
@@ -673,18 +842,19 @@ impl <'a, 'b, T: HtsRead> HtsIterator<T> for HtsItrReader<'a, 'b, T> {
                     self.itr = Some(self.hts.itr_query(reg)?);
                     self.region = Some(reg)
                 } else {
-                    break
+                    break;
                 }
             }
-            let itr= self.itr.as_mut().unwrap();
+            let itr = self.itr.as_mut().unwrap();
             let r = rec.read_itr(self.hts, itr)?;
-            if r { return Ok(true) }
+            if r {
+                return Ok(true);
+            }
             self.itr = None;
             self.region = None;
         }
         Ok(false)
     }
-
 
     fn header(&self) -> Option<&HtsHdr> {
         self.hts.header()
@@ -700,21 +870,38 @@ pub struct Region {
 }
 
 impl Region {
-    pub fn new() -> Self { Self::default() }
-
-    pub fn make(tid: c_int, begin: HtsPos, end: HtsPos) -> Self {
-        Self { tid, begin, end, idx: None }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn set_idx(&mut self, idx: Option<u32>) { self.idx = idx }
+    pub fn make(tid: c_int, begin: HtsPos, end: HtsPos) -> Self {
+        Self {
+            tid,
+            begin,
+            end,
+            idx: None,
+        }
+    }
 
-    pub fn idx(&self) -> Option<u32> { self.idx }
+    pub fn set_idx(&mut self, idx: Option<u32>) {
+        self.idx = idx
+    }
 
-    pub fn tid(&self) -> c_int { self.tid }
+    pub fn idx(&self) -> Option<u32> {
+        self.idx
+    }
 
-    pub fn begin(&self) -> HtsPos { self.begin }
+    pub fn tid(&self) -> c_int {
+        self.tid
+    }
 
-    pub fn end(&self) -> HtsPos { self.end }
+    pub fn begin(&self) -> HtsPos {
+        self.begin
+    }
+
+    pub fn end(&self) -> HtsPos {
+        self.end
+    }
 }
 
 impl Ord for Region {
@@ -730,7 +917,9 @@ impl Ord for Region {
 }
 
 impl PartialOrd for Region {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -741,20 +930,30 @@ pub struct RegionList {
 impl Deref for RegionList {
     type Target = [Region];
     #[inline]
-    fn deref(&self) -> &[Region] { &self.regions }
+    fn deref(&self) -> &[Region] {
+        &self.regions
+    }
 }
 
 impl RegionList {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn add_region(&mut self, reg: Region) { self.regions.push(reg) }
+    pub fn add_region(&mut self, reg: Region) {
+        self.regions.push(reg)
+    }
 
     pub fn merge(&mut self) {
         if self.regions.len() > 1 {
             // Sort regions
             self.regions.sort();
             // Check for overlaps
-            if self.regions.windows(2).any(|v| v[0].tid == v[1].tid && v[0].end >= v[1].begin) {
+            if self
+                .regions
+                .windows(2)
+                .any(|v| v[0].tid == v[1].tid && v[0].end >= v[1].begin)
+            {
                 // If we have overlaps, construct a new list, merging overlapping regions
                 let mut nlist = Vec::new();
                 let mut prev = self.regions[0];
@@ -782,7 +981,9 @@ pub enum WriterFd {
 impl WriterFd {
     fn from_htsfile(htsfile: &mut HtsFile) -> io::Result<Self> {
         if htsfile.is_write() == 0 {
-            Err(hts_err("Can not set up Writer for a read only file".to_string()))
+            Err(hts_err(
+                "Can not set up Writer for a read only file".to_string(),
+            ))
         } else {
             match htsfile.file_desc() {
                 Some(HtsFileDesc::Hfile(fd)) => Ok(WriterFd::Hfile(fd)),
@@ -795,21 +996,25 @@ impl WriterFd {
 
     pub fn set_mt(&mut self, n_threads: usize, n_blocks: usize) {
         if let Self::Bgzf(fd) = self {
-            unsafe { bgzf_mt(fd.as_mut(), n_threads as c_int, n_blocks as c_int ); }
+            unsafe {
+                bgzf_mt(fd.as_mut(), n_threads as c_int, n_blocks as c_int);
+            }
         }
     }
 }
 
 impl Write for WriterFd {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let i = unsafe {match self {
-            WriterFd::Hfile(mut fd) => {
-                hwrite(fd.as_mut(), buf.as_ptr(), buf.len() as size_t)
-            },
-            WriterFd::Bgzf(mut fd) => {
-                bgzf_write(fd.as_mut(), buf.as_ptr() as *const c_void, buf.len() as size_t)
-            },
-        }};
+        let i = unsafe {
+            match self {
+                WriterFd::Hfile(mut fd) => hwrite(fd.as_mut(), buf.as_ptr(), buf.len() as size_t),
+                WriterFd::Bgzf(mut fd) => bgzf_write(
+                    fd.as_mut(),
+                    buf.as_ptr() as *const c_void,
+                    buf.len() as size_t,
+                ),
+            }
+        };
         if i < 0 {
             Err(hts_err("Write error".to_string()))
         } else {
@@ -818,10 +1023,17 @@ impl Write for WriterFd {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if unsafe { match self {
-            WriterFd::Hfile(mut fd) => hflush(fd.as_mut()),
-            WriterFd::Bgzf(mut fd) => bgzf_flush(fd.as_mut()),
-        }} == 0 { Ok(()) } else { Err(hts_err("flush returned error".to_string())) }
+        if unsafe {
+            match self {
+                WriterFd::Hfile(mut fd) => hflush(fd.as_mut()),
+                WriterFd::Bgzf(mut fd) => bgzf_flush(fd.as_mut()),
+            }
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(hts_err("flush returned error".to_string()))
+        }
     }
 }
 pub struct Writer<'a> {
@@ -829,18 +1041,27 @@ pub struct Writer<'a> {
     phantom: PhantomData<&'a mut HtsFile>,
 }
 
-impl <'a>Writer<'a> {
+impl<'a> Writer<'a> {
     pub fn new(htsfile: &'a mut HtsFile) -> io::Result<Self> {
         let fd = WriterFd::from_htsfile(htsfile)?;
-        Ok(Self{fd, phantom: PhantomData})
+        Ok(Self {
+            fd,
+            phantom: PhantomData,
+        })
     }
 
-    pub fn set_mt(&mut self, n_threads: usize, n_blocks: usize) { self.fd.set_mt(n_threads,n_blocks) }
+    pub fn set_mt(&mut self, n_threads: usize, n_blocks: usize) {
+        self.fd.set_mt(n_threads, n_blocks)
+    }
 }
 
-impl <'a> Write for Writer<'a> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.fd.write(buf) }
-    fn flush(&mut self) -> io::Result<()> { self.fd.flush() }
+impl<'a> Write for Writer<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.fd.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.fd.flush()
+    }
 }
 
 pub struct OwnedWriter {
@@ -852,20 +1073,29 @@ impl OwnedWriter {
     pub fn new(mut hts: Hts) -> io::Result<Self> {
         let htsfile = hts.hts_file_mut();
         let fd = WriterFd::from_htsfile(htsfile)?;
-        Ok(Self{hts, fd})
+        Ok(Self { hts, fd })
     }
 
-    pub fn hts(&self) -> &Hts { &self.hts }
+    pub fn hts(&self) -> &Hts {
+        &self.hts
+    }
 
-    pub fn hts_mut(&mut self) -> &mut Hts { &mut self.hts }
+    pub fn hts_mut(&mut self) -> &mut Hts {
+        &mut self.hts
+    }
 
-    pub fn set_mt(&mut self, n_threads: usize, n_blocks: usize) { self.fd.set_mt(n_threads,n_blocks) }
-
+    pub fn set_mt(&mut self, n_threads: usize, n_blocks: usize) {
+        self.fd.set_mt(n_threads, n_blocks)
+    }
 }
 
 impl Write for OwnedWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.fd.write(buf) }
-    fn flush(&mut self) -> io::Result<()> { self.fd.flush() }
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.fd.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.fd.flush()
+    }
 }
 
 pub fn hts_set_log_level(level: htsLogLevel) {
